@@ -3,7 +3,7 @@ import time
 import math
 import cv2
 import numpy as np
-from Focuser import Focuser
+from B016712MP.Focuser import Focuser
 
 class AutoFocus:
     MAX_FOCUS_VALUE = 1100
