@@ -28,10 +28,10 @@ import numpy as py
 import os
 import sys
 import time
-from RpiCamera import Camera
+from B016712MP.RpiCamera import Camera
 
-from Focuser import Focuser
-from AutoFocus import AutoFocus
+from B016712MP.Focuser import Focuser
+from B016712MP.AutoFocus import AutoFocus
 import curses
 
 global image_count

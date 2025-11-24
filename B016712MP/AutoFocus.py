@@ -27,10 +27,10 @@ import time
 import math
 import cv2 #sudo apt-get install python-opencv
 import numpy as np
-# import picamera
+#mport picamera
 # from picamera.array import PiRGBArray
-from RpiCamera import *
-from Focuser import Focuser 
+from B016712MP.Focuser import Focuser
+
 
 
 class AutoFocus:

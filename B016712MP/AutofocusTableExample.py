@@ -24,8 +24,8 @@ import os
 import sys
 import time
 import argparse
-from RpiCamera import Camera
-from Focuser import Focuser
+from B016712MP.RpiCamera import Camera
+from B016712MP.Focuser import Focuser
 import curses
 from datetime import datetime
 
