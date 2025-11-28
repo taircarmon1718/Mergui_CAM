@@ -65,7 +65,8 @@ from picamera2 import Picamera2
 # ============================================================
 # Add PTZ library path
 # ============================================================
-sys.path.append("/Users/taircarmon/Desktop/Mergui_CAM")
+sys.path.append("/home/tair/Desktop/Mergui_CAM")
+
 from B016712MP.Focuser import Focuser
 from B016712MP.AutoFocus import AutoFocus
 # ============================================================
