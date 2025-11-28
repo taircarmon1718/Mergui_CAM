@@ -74,10 +74,11 @@ from B016712MP.AutoFocus import AutoFocus
 # ============================================================
 cam = Picamera2()
 cam.configure(cam.create_video_configuration(
-    main={"size": (640, 360), "format": "RGB888"}
+    main={"size": (360, 640), "format": "RGB888"}
 ))
 cam.start()
 time.sleep(2)
+'''
 # ============================================================
 # PTZ / Focuser Setup
 # ============================================================
@@ -101,6 +102,7 @@ auto_focus.debug = True
 max_index, max_value = auto_focus.startFocus2()
 print(f"Autofocus completed: index={max_index}, value={max_value}")
 time.sleep(1)
+'''
 # ============================================================
 # Frame Capture Thread (FAST & SMOOTH)
 # ============================================================
@@ -147,9 +149,11 @@ except KeyboardInterrupt:
 # Shutdown / Reset Everything
 # ============================================================
 cam.stop()
+'''
 focuser.waitIdle()
 focuser.set(Focuser.OPT_MODE, 0)  # Disable motors
 focuser.resetAll()
+'''
 cv2.destroyAllWindows()
 print("Shutdown complete.")
 
