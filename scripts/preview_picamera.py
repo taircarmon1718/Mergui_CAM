@@ -2,12 +2,12 @@
 import sys
 import time
 import cv2
-from picamera2 import Picamera2
+from picamera2 import Picamera2  # noinspection PyUnresolvedReferences
 
 # ============================================================
 # Add project root so PTZ library can be imported
 # ============================================================
-sys.path.append("/Users/taircarmon/Desktop/Mergui_CAM")
+#sys.path.append("/Users/taircarmon/Desktop/Mergui_CAM")
 
 from B016712MP.Focuser import Focuser
 
