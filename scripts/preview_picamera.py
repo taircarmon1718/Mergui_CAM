@@ -22,7 +22,7 @@ from B016712MP.AutoFocus import AutoFocus
 # ============================================================
 cam = Picamera2()
 cam.configure(cam.create_video_configuration(
-    main={"size": (640, 360), "format": "RGB888"}
+    main={"size": (360, 640), "format": "RGB888"}
 ))
 cam.start()
 time.sleep(2)
@@ -95,6 +95,23 @@ try:
         cv2.imshow("Mergui Camera Preview", frame)
 
         key = cv2.waitKey(1) & 0xFF
+
+        if key == ord('a'):
+            focuser.set(Focuser.OPT_MOTOR_X, 0)
+            time.sleep(2)
+            focuser.set(Focuser.OPT_MOTOR_Y, 25)
+            time.sleep(2)
+        if key == ord('b'):
+            focuser.set(Focuser.OPT_MOTOR_X, 90)
+            time.sleep(2)
+            focuser.set(Focuser.OPT_MOTOR_Y, 25)
+            time.sleep(2)
+        if key == ord('c'):
+            focuser.set(Focuser.OPT_MOTOR_X, 180)
+            time.sleep(2)
+            focuser.set(Focuser.OPT_MOTOR_Y, 25)
+            time.sleep(2)
+
         if key == ord('q'):
             break
         elif key in (ord('+'), ord('=')):
