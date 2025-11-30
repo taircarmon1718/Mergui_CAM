@@ -1,45 +1,80 @@
-
-# scripts/preview_picamera.py
+# python
 import sys
 import time
 import threading
 import cv2
 import numpy as np
 
-# picamera2 may not be available to the IDE; import defensively so linters don't fail
+# Ensure PTZ library path (adjust if your project is in a different place)
+sys.path.append("/Users/taircarmon/Desktop/Mergui_CAM")
+
+# Picamera2 import (runtime required)
 try:
     from picamera2 import Picamera2
-except Exception:
-    Picamera2 = None  # runtime will fail if camera is required
+except Exception as e:
+    raise RuntimeError("picamera2 is required to run this script") from e
 
-# Add PTZ library path
-sys.path.append("/Users/taircarmon/Desktop/Mergui_CAM")
+# Force import of focuser classes; fail if not present (user requested forced setup)
 try:
     from B016712MP.Focuser import Focuser
     from B016712MP.AutoFocus import AutoFocus
-    has_focuser = True
-except Exception:
-    has_focuser = False
+except Exception as e:
+    raise RuntimeError("Focuser library not found at /Users/taircarmon/Desktop/Mergui_CAM") from e
 
-if Picamera2 is None:
-    raise RuntimeError("picamera2 not available on this system. Install picamera2 or run on target hardware.")
-
-# Camera Setup
+# Camera Setup (do not change this configuration)
 cam = Picamera2()
 cam.configure(cam.create_video_configuration(
-    main={"size": (640, 360), "format": "RGB888"}
+    main={"size": (360, 640), "format": "RGB888"}
 ))
 cam.start()
 time.sleep(2)
 
-# Optional PTZ / Focuser Setup (non-fatal)
+# Force PTZ / Focuser Setup (will raise on failure)
 focuser = None
-if has_focuser:
+try:
+    focuser = Focuser(1)
+    # Enable motors
+    focuser.set(Focuser.OPT_MODE, 1)
+    time.sleep(0.5)
+
+    print("Disabling IR-CUT...")
+    focuser.set(Focuser.OPT_IRCUT, 0)
+    time.sleep(0.5)
+
+    # Optional small initial movements to engage motors
+    print("Initial pan/tilt movement...")
     try:
-        focuser = Focuser(1)
+        focuser.set(Focuser.OPT_MOTOR_X, 300)
+        time.sleep(2)
+        focuser.set(Focuser.OPT_MOTOR_Y, 25)
+        time.sleep(2)
+        # Reset pan to 0 (keep pan at 0 as requested)
+        focuser.set(Focuser.OPT_MOTOR_X, 0)
+        time.sleep(1)
+    except Exception as e:
+        raise RuntimeError("Initial PTZ movement failed") from e
+
+    # Try running autofocus if available
+    try:
+        auto_focus = AutoFocus(focuser, cam)
+        auto_focus.debug = True
+        max_index, max_value = auto_focus.startFocus2()
+        print(f"Autofocus completed: index={max_index}, value={max_value}")
+        time.sleep(1)
     except Exception:
-        focuser = None
-        has_focuser = False
+        # autofocus optional; continue if it fails
+        pass
+
+    print("PTZ initialization complete.")
+except Exception as e:
+    # Force failure so user must fix hardware/library before proceeding
+    print("Focuser initialization failed. Aborting.")
+    try:
+        cam.stop()
+        cam.close()
+    except Exception:
+        pass
+    raise
 
 # Shared state for capture + zoom/pan
 latest_frame = None
@@ -48,82 +83,36 @@ zoom = 1.0
 zoom_center = None  # (x, y) in pixel coords relative to frame
 last_print = 0
 
-# Local fallback pan/tilt values when no focuser is available
+# Fallback local values (kept in sync if hardware calls fail)
 fake_pan = 0
 fake_tilt = 0
 
-def initialize_ptz():
-    """Perform the initial PTZ/focuser adjustments required so pan will work later."""
-    global focuser
-    if focuser is None:
-        return
-
-    try:
-        print("Enabling motors...")
-        focuser.set(Focuser.OPT_MODE, 1)  # Enable motors
-        time.sleep(0.5)
-
-        print("Disabling IR-CUT...")
-        focuser.set(Focuser.OPT_IRCUT, 0)
-        time.sleep(0.5)
-
-        # Example initial movement sequence from your sample.
-        print("Initial pan/tilt movement...")
-        try:
-            # small jog to ensure motors engaged (values from your sample)
-            focuser.set(Focuser.OPT_MOTOR_X, 300)
-            time.sleep(2)
-            focuser.set(Focuser.OPT_MOTOR_Y, 25)
-            time.sleep(2)
-            # ensure pan zeroed if required
-            focuser.set(Focuser.OPT_MOTOR_X, 0)
-            time.sleep(1)
-        except Exception as e:
-            print("PTZ initial move failed:", e)
-
-        # Run autofocus if AutoFocus class is available
-        try:
-            print("Starting AutoFocus...")
-            auto_focus = AutoFocus(focuser, cam)
-            auto_focus.debug = True
-            max_index, max_value = auto_focus.startFocus2()
-            print(f"Autofocus completed: index={max_index}, value={max_value}")
-            time.sleep(1)
-        except Exception:
-            # autofocus is optional; ignore failures
-            pass
-
-        print("Initial PTZ setup complete.")
-    except Exception as e:
-        print("PTZ initialization error:", e)
-
 def get_ptz_coords():
     # Return pan, tilt raw motor values (or fallback)
-    if focuser is not None:
-        try:
-            pan = focuser.get(Focuser.OPT_MOTOR_X)
-            tilt = focuser.get(Focuser.OPT_MOTOR_Y)
-            return pan, tilt
-        except Exception:
-            return None, None
-    else:
+    global fake_pan, fake_tilt
+    try:
+        pan = focuser.get(Focuser.OPT_MOTOR_X)
+        tilt = focuser.get(Focuser.OPT_MOTOR_Y)
+        return pan, tilt
+    except Exception:
         return fake_pan, fake_tilt
 
 def set_ptz(pan_val, tilt_val):
     global fake_pan, fake_tilt
-    if focuser is not None:
-        try:
-            focuser.set(Focuser.OPT_MOTOR_X, int(pan_val))
-            focuser.set(Focuser.OPT_MOTOR_Y, int(tilt_val))
-            return
-        except Exception:
-            pass
-    fake_pan, fake_tilt = pan_val, tilt_val
+    try:
+        focuser.set(Focuser.OPT_MOTOR_X, int(pan_val))
+        focuser.set(Focuser.OPT_MOTOR_Y, int(tilt_val))
+    except Exception:
+        # If hardware fails for any reason, keep local values for display
+        fake_pan, fake_tilt = pan_val, tilt_val
 
 def apply_digital_zoom(frame, z, center):
+    """
+    Returns (processed_frame, adjusted_center).
+    adjusted_center is the actual center used for the crop (clamped).
+    """
     h, w = frame.shape[:2]
     cx, cy = center if center is not None else (w // 2, h // 2)
-
     cx = int(min(max(cx, 0), w))
     cy = int(min(max(cy, 0), h))
 
@@ -175,11 +164,11 @@ def capture_thread():
             if zoom_center is None:
                 zoom_center = (w // 2, h // 2)
             fz, adjusted_center = apply_digital_zoom(frame, zoom, zoom_center)
+            # Store the actual center used for crop so pan/arrow moves match what is displayed
             zoom_center = adjusted_center
             latest_frame = fz
 
-# Run PTZ initialization before starting the preview/capture thread
-initialize_ptz()
+# Start capture thread after PTZ init (PTZ was forced above)
 threading.Thread(target=capture_thread, daemon=True).start()
 
 # Main Preview Loop
@@ -217,6 +206,12 @@ try:
         cv2.imshow("Mergui PTZ Camera Preview", frame)
         key = cv2.waitKey(1) & 0xFF
 
+        # Controls:
+        # q - quit, + / = - zoom in, - - zoom out
+        # Arrow keys to move zoom center (raw codes)
+        # 1 - tilt 0, pan 0
+        # 2 - tilt 90, pan 0
+        # 3 - tilt 180, pan 0
         if key == ord('q'):
             break
         elif key in (ord('+'), ord('=')):
@@ -267,14 +262,13 @@ finally:
         cam.close()
     except Exception:
         pass
+
     if focuser is not None:
         try:
-            # Wait for motor to become free and then disable
             focuser.waitingForFree()
             time.sleep(0.5)
             focuser.set(Focuser.OPT_MODE, 0)  # Disable motors
             time.sleep(0.5)
-            # Reset chip registers as in your sample
             try:
                 focuser.write(focuser.CHIP_I2C_ADDR, 0x11, 0x0001)
                 time.sleep(0.5)
@@ -282,5 +276,6 @@ finally:
                 pass
         except Exception:
             pass
+
     cv2.destroyAllWindows()
     print("Shutdown complete.")
