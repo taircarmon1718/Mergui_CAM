@@ -84,6 +84,14 @@ try:
         pan_str = str(pan) if pan is not None else "N/A"
         tilt_str = str(tilt) if tilt is not None else "N/A"
 
+            # Draw a central bounding box
+        h, w, _ = frame.shape
+        box_size = 100
+        x1 = (w - box_size) // 2
+        y1 = (h - box_size) // 2
+        x2 = x1 + box_size
+        y2 = y1 + box_size
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
         # Draw overlay: pan / tilt / zoom
         cv2.putText(frame, f"Pan: {pan_str}", (10, 20),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
@@ -101,16 +109,20 @@ try:
             time.sleep(2)
             focuser.set(Focuser.OPT_MOTOR_Y, 25)
             time.sleep(2)
+            continue
         if key == ord('b'):
             focuser.set(Focuser.OPT_MOTOR_X, 90)
             time.sleep(2)
             focuser.set(Focuser.OPT_MOTOR_Y, 25)
             time.sleep(2)
+
+            continue
         if key == ord('c'):
             focuser.set(Focuser.OPT_MOTOR_X, 180)
             time.sleep(2)
             focuser.set(Focuser.OPT_MOTOR_Y, 25)
             time.sleep(2)
+            continue
 
         if key == ord('q'):
             break
