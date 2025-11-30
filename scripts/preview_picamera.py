@@ -43,16 +43,33 @@ zoom = 1.0
 zoom_center = None  # (x, y) in pixel coords relative to frame
 last_print = 0
 
+# Local fallback pan/tilt values when no focuser is available
+fake_pan = 0
+fake_tilt = 0
+
 def get_ptz_coords():
-    # Return pan, tilt raw motor values (or None)
-    if focuser is None:
-        return None, None
-    try:
-        pan = focuser.get(Focuser.OPT_MOTOR_X)
-        tilt = focuser.get(Focuser.OPT_MOTOR_Y)
-        return pan, tilt
-    except Exception:
-        return None, None
+    # Return pan, tilt raw motor values (or fallback)
+    if focuser is not None:
+        try:
+            pan = focuser.get(Focuser.OPT_MOTOR_X)
+            tilt = focuser.get(Focuser.OPT_MOTOR_Y)
+            return pan, tilt
+        except Exception:
+            return None, None
+    else:
+        return fake_pan, fake_tilt
+
+def set_ptz(pan_val, tilt_val):
+    global fake_pan, fake_tilt
+    if focuser is not None:
+        try:
+            focuser.set(Focuser.OPT_MOTOR_X, int(pan_val))
+            focuser.set(Focuser.OPT_MOTOR_Y, int(tilt_val))
+        except Exception:
+            # If hardware fails, fall back to local values for display
+            fake_pan, fake_tilt = pan_val, tilt_val
+    else:
+        fake_pan, fake_tilt = pan_val, tilt_val
 
 def apply_digital_zoom(frame, z, center):
     h, w = frame.shape[:2]
@@ -134,6 +151,9 @@ try:
         # Controls:
         # q - quit, + / = - zoom in, - - zoom out
         # Arrow keys to move zoom center (handled via raw codes)
+        # 1 - tilt 0, pan 0
+        # 2 - tilt 90, pan 0
+        # 3 - tilt 180, pan 0
         if key == ord('q'):
             break
         elif key in (ord('+'), ord('=')):
@@ -162,6 +182,19 @@ try:
             with lock:
                 zoom = 1.0
                 zoom_center = (width // 2, height // 2)
+        elif key == ord('1'):
+            # Move tilt to 0, pan to 0
+            set_ptz(0, 0)
+            last_print = 0  # force immediate print/update
+            print("Moved to Pan=0 Tilt=0")
+        elif key == ord('2'):
+            set_ptz(0, 90)
+            last_print = 0
+            print("Moved to Pan=0 Tilt=90")
+        elif key == ord('3'):
+            set_ptz(0, 180)
+            last_print = 0
+            print("Moved to Pan=0 Tilt=180")
 
 except KeyboardInterrupt:
     pass
