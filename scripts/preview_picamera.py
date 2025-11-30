@@ -1,4 +1,3 @@
-python
 # python
 import sys
 import time
