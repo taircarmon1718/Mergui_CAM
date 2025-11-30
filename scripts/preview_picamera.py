@@ -3,7 +3,12 @@ import sys
 import time
 import cv2
 from picamera2 import Picamera2  # noinspection PyUnresolvedReferences
+# python
+import os
 
+# Add the project root directory to the Python path
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, project_root)
 # ============================================================
 # Add project root so PTZ library can be imported
 # ============================================================
