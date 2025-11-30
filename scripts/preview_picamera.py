@@ -1,3 +1,4 @@
+python
 # python
 import sys
 import time
@@ -72,29 +73,63 @@ def set_ptz(pan_val, tilt_val):
         fake_pan, fake_tilt = pan_val, tilt_val
 
 def apply_digital_zoom(frame, z, center):
+    """
+    Returns (processed_frame, adjusted_center).
+    adjusted_center is the actual center used for the crop (clamped so crop is valid).
+    """
     h, w = frame.shape[:2]
+    cx, cy = center if center is not None else (w // 2, h // 2)
+
+    # clamp incoming center to frame bounds
+    cx = int(min(max(cx, 0), w))
+    cy = int(min(max(cy, 0), h))
+
     if z <= 1.0:
-        return frame
-    # crop size
+        # no zoom, center stays within frame
+        return frame, (cx, cy)
+
+    # crop size (target)
     crop_w = int(w / z)
     crop_h = int(h / z)
-    cx, cy = center
-    x1 = max(0, int(cx - crop_w // 2))
-    y1 = max(0, int(cy - crop_h // 2))
-    x2 = min(w, x1 + crop_w)
-    y2 = min(h, y1 + crop_h)
-    # adjust if crop near border
-    if x2 - x1 < crop_w:
-        x1 = max(0, x2 - crop_w)
-    if y2 - y1 < crop_h:
-        y1 = max(0, y2 - crop_h)
+
+    # initial top-left
+    x1 = int(cx - crop_w // 2)
+    y1 = int(cy - crop_h // 2)
+    x2 = x1 + crop_w
+    y2 = y1 + crop_h
+
+    # clamp crop to frame and adjust top-left if needed
+    if x1 < 0:
+        x1 = 0
+        x2 = crop_w
+    if y1 < 0:
+        y1 = 0
+        y2 = crop_h
+    if x2 > w:
+        x2 = w
+        x1 = max(0, w - crop_w)
+    if y2 > h:
+        y2 = h
+        y1 = max(0, h - crop_h)
+
+    # recompute actual crop width/height in case near border (should match crop_w/crop_h)
+    actual_w = x2 - x1
+    actual_h = y2 - y1
+    if actual_w <= 0 or actual_h <= 0:
+        # fallback to full frame
+        return frame, (w // 2, h // 2)
+
     cropped = frame[y1:y2, x1:x2]
-    if cropped.size == 0:
-        return frame
-    return cv2.resize(cropped, (w, h), interpolation=cv2.INTER_LINEAR)
+    resized = cv2.resize(cropped, (w, h), interpolation=cv2.INTER_LINEAR)
+
+    # compute the actual center used for this crop in original-frame coordinates
+    adjusted_cx = x1 + actual_w // 2
+    adjusted_cy = y1 + actual_h // 2
+
+    return resized, (adjusted_cx, adjusted_cy)
 
 def capture_thread():
-    global latest_frame, zoom_center
+    global latest_frame, zoom_center, zoom
     while True:
         frame = cam.capture_array()
         frame = cv2.transpose(frame)
@@ -104,7 +139,9 @@ def capture_thread():
             if zoom_center is None:
                 zoom_center = (w // 2, h // 2)
             # apply digital zoom using current center and zoom
-            fz = apply_digital_zoom(frame, zoom, zoom_center)
+            fz, adjusted_center = apply_digital_zoom(frame, zoom, zoom_center)
+            # update zoom_center to the actual center used for the crop so pan matches display
+            zoom_center = adjusted_center
             latest_frame = fz
 
 threading.Thread(target=capture_thread, daemon=True).start()
@@ -133,7 +170,7 @@ try:
         pan, tilt = get_ptz_coords()
         pan_str = str(pan) if pan is not None else "N/A"
         tilt_str = str(tilt) if tilt is not None else "N/A"
-        z_center = zoom_center if zoom_center is not None else (width//2, height//2)
+        z_center = zoom_center if zoom_center is not None else (width // 2, height // 2)
         zoom_text = f"Zoom: {zoom:.2f}  Center: ({z_center[0]}, {z_center[1]})"
         servo_text = f"Pan: {pan_str}  Tilt: {tilt_str}"
         cv2.putText(frame, zoom_text, (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
