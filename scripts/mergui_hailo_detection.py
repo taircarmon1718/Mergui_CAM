@@ -20,7 +20,8 @@ from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_app import (
 from hailo_apps.hailo_app_python.apps.detection.detection_pipeline import (
     GStreamerDetectionApp
 )
-
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, project_root)
 # PTZ imports
 from B016712MP.Focuser import Focuser
 from B016712MP.AutoFocus import AutoFocus
