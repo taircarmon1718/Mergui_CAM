@@ -17,9 +17,8 @@ from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_app import (
     app_callback_class,
 )
 
-from hailo_apps.hailo_app_python.apps.detection.detection_pipeline import (
-    GStreamerDetectionApp,
-)
+from hailo_rpi5_examples.basic_pipelines.detection_pipeline import GStreamerDetectionApp
+
 
 # PTZ
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
