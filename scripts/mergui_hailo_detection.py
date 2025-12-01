@@ -173,7 +173,7 @@ if __name__ == "__main__":
     user_data = UserApp()
 
     # Force input from RPI camera
-    app = GStreamerDetectionApp(app_callback, user_data, input="rpi")
+    app = GStreamerDetectionApp(app_callback, user_data)
 
     print("\n========== STARTING HAILO PIPELINE ==========\n")
     app.run()
