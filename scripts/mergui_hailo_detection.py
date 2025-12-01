@@ -1,24 +1,16 @@
-#!/usr/bin/env python3
 import os
+import sys
 import time
 import gi
+
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
-import sys
-import hailo
-import numpy as np
 
-from hailo_apps.hailo_app_python.core.common.buffer_utils import (
-    get_caps_from_pad,
-    get_numpy_from_buffer,
-)
+# Add hailo-rpi5-examples folder to Python path
+sys.path.append("/home/tair/hailo-rpi5-examples")
 
-from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_app import (
-    app_callback_class,
-)
-
-from hailo_rpi5_examples.basic_pipelines.detection_pipeline import GStreamerDetectionApp
-
+# Import the correct detection pipeline
+from basic_pipelines.detection_pipeline import GStreamerDetectionApp
 
 # PTZ
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
