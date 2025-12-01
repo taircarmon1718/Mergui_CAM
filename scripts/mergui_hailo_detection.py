@@ -3,6 +3,7 @@ import os
 import cv2
 import numpy as np
 import gi
+import sys
 
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
