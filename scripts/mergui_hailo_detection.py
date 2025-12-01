@@ -4,7 +4,7 @@ import time
 import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
-
+import sys
 import hailo
 import numpy as np
 
