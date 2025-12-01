@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 import os
 import time
-import gi
-gi.require_version('Gst', '1.0')
-from gi.repository import Gst, GLib
 import sys
-import hailo
+import gi
+import cv2
 import numpy as np
 
-from hailo_apps.hailo_app_python.core.common.buffer_utils import (
+gi.require_version('Gst', '1.0')
+from gi.repository import Gst, GLib
+import hailo
+
+# Hailo helper imports
+from hailo_rpi_common import (
     get_caps_from_pad,
     get_numpy_from_buffer,
-)
-
-from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_app import (
     app_callback_class,
+    get_default_parser,
 )
 
 from hailo_apps.hailo_app_python.apps.detection.detection_pipeline import (
@@ -28,75 +29,105 @@ from B016712MP.Focuser import Focuser
 
 
 # =====================================================================
-# USER APP — runs ONCE, init PTZ, etc.
+# USER APP - STATE MANAGEMENT
 # =====================================================================
 class UserApp(app_callback_class):
     def __init__(self):
         super().__init__()
 
-        print("\n========== PTZ INITIALIZATION ==========\n")
-
-        # Create focuser
+        print("[INFO] PTZ Initialization started...")
         self.focuser = Focuser(1)
 
-        # Enable motors
-        print("Enabling motors (OPT_MODE = 1)…")
+        # Init Motors
         self.focuser.set(Focuser.OPT_MODE, 1)
-        time.sleep(0.4)
-
-        # Disable IR CUT
-        print("Disabling IR-CUT…")
         self.focuser.set(Focuser.OPT_IRCUT, 0)
-        time.sleep(0.4)
 
-        # Reset chip
-        print("Resetting chip registers…")
-        try:
-            self.focuser.write(self.focuser.CHIP_I2C_ADDR, 0x11, 0x0001)
-        except Exception as e:
-            print("Chip reset skipped:", e)
-        time.sleep(0.4)
-
-        # Initial PTZ position
-        print("Moving PTZ to initial position…")
+        # Reset position
         self.focuser.set(Focuser.OPT_MOTOR_X, 300)
-        time.sleep(1)
         self.focuser.set(Focuser.OPT_MOTOR_Y, 25)
-        time.sleep(1)
 
-        print("\n========== PTZ READY ==========\n")
+        # --- Autofocus State Variables ---
+        self.perform_autofocus = True  # Flag to run focus once
+        self.focus_pos = 0  # Current lens position
+        self.focus_step = 20  # Step size for scanning
+        self.focus_max = 600  # Max limit for focus motor
+        self.best_focus_val = 0.0  # Highest sharpness score found
+        self.best_focus_pos = 0  # Position of highest sharpness
+        self.frame_counter = 0  # Frame skipper for motor stability
 
-        # Tracking config
+        # --- Tracking Variables ---
         self.frame_w = None
         self.frame_h = None
         self.gain_x = 25
         self.gain_y = 18
 
+        print("[INFO] PTZ Ready. Waiting for pipeline...")
+
 
 # =====================================================================
-# CALLBACK — runs EVERY frame
+# CALLBACK - RUNS EVERY FRAME
 # =====================================================================
 def app_callback(pad, info, user_data: UserApp):
-
     buffer = info.get_buffer()
     if buffer is None:
         return Gst.PadProbeReturn.OK
 
+    # Get video dimensions
     fmt, w, h = get_caps_from_pad(pad)
     if user_data.frame_w is None:
         user_data.frame_w = w
         user_data.frame_h = h
-        print(f"Camera resolution: {w}x{h}")
 
-    frame = get_numpy_from_buffer(buffer, fmt, w, h)
+    # ==========================================================
+    # PHASE 1: AUTOFOCUS (Runs once at startup)
+    # ==========================================================
+    if user_data.perform_autofocus:
+        user_data.frame_counter += 1
 
-    # get detections
+        # Process every 4th frame to allow lens motor to settle
+        if user_data.frame_counter % 4 != 0:
+            return Gst.PadProbeReturn.OK
+
+        # Convert buffer to numpy array for OpenCV
+        frame = get_numpy_from_buffer(buffer, fmt, w, h)
+
+        # Calculate Sharpness (Laplacian Variance)
+        gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+        score = cv2.Laplacian(gray, cv2.CV_64F).var()
+
+        # print(f"[FOCUS] Pos: {user_data.focus_pos} | Sharpness: {score:.2f}")
+
+        # Keep track of best focus
+        if score > user_data.best_focus_val:
+            user_data.best_focus_val = score
+            user_data.best_focus_pos = user_data.focus_pos
+
+        # Move lens
+        user_data.focus_pos += user_data.focus_step
+
+        # Check if scan is complete
+        if user_data.focus_pos <= user_data.focus_max:
+            user_data.focuser.set(Focuser.OPT_FOCUS, user_data.focus_pos)
+        else:
+            # Apply best focus found and disable flag
+            print(f"[INFO] Autofocus Complete. Best Position: {user_data.best_focus_pos}")
+            user_data.focuser.set(Focuser.OPT_FOCUS, user_data.best_focus_pos)
+            user_data.perform_autofocus = False  # STOP AUTOFOCUS PERMANENTLY
+
+        return Gst.PadProbeReturn.OK
+
+    # ==========================================================
+    # PHASE 2: DETECTION & TRACKING (Runs after focus is done)
+    # ==========================================================
+
+    # Get Hailo detections
     roi = hailo.get_roi_from_buffer(buffer)
     detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
 
-    best = None
-    best_area = 0
+    best_target = None
+    max_area = 0
 
+    # Filter for 'person'
     for det in detections:
         if det.get_label() != "person":
             continue
@@ -104,36 +135,36 @@ def app_callback(pad, info, user_data: UserApp):
         bbox = det.get_bbox()
         area = bbox.width() * bbox.height()
 
-        if area > best_area:
-            best_area = area
-            best = det
+        if area > max_area:
+            max_area = area
+            best_target = det
 
-    # no person
-    if best is None:
+    if best_target is None:
         return Gst.PadProbeReturn.OK
 
-    bbox = best.get_bbox()
+    # Calculate center error
+    bbox = best_target.get_bbox()
     cx = bbox.xmin() + bbox.width() / 2
     cy = bbox.ymin() + bbox.height() / 2
 
-    fx = user_data.frame_w / 2
-    fy = user_data.frame_h / 2
+    # Error relative to center (0.5, 0.5)
+    err_x = (cx - 0.5)
+    err_y = (cy - 0.5)
 
-    err_x = cx - fx
-    err_y = cy - fy
+    # Get current motor position
+    current_pan = user_data.focuser.get(Focuser.OPT_MOTOR_X)
+    current_tilt = user_data.focuser.get(Focuser.OPT_MOTOR_Y)
 
-    # current ptz
-    pan = user_data.focuser.get(Focuser.OPT_MOTOR_X)
-    tilt = user_data.focuser.get(Focuser.OPT_MOTOR_Y)
+    # Calculate new position (PID-like proportional control)
+    # Note: Direction (+/-) depends on camera mounting. Flip signs if moving wrong way.
+    new_pan = int(current_pan - (err_x * user_data.gain_x))
+    new_tilt = int(current_tilt - (err_y * user_data.gain_y))
 
-    # compute new PTZ
-    new_pan = int(pan + (err_x / user_data.frame_w) * user_data.gain_x)
-    new_tilt = int(tilt + (err_y / user_data.frame_h) * user_data.gain_y)
+    # Safety Limits
+    new_pan = max(0, min(1000, new_pan))
+    new_tilt = max(0, min(1000, new_tilt))
 
-    # limits
-    new_pan = max(0, min(350, new_pan))
-    new_tilt = max(0, min(180, new_tilt))
-
+    # Move Motors
     user_data.focuser.set(Focuser.OPT_MOTOR_X, new_pan)
     user_data.focuser.set(Focuser.OPT_MOTOR_Y, new_tilt)
 
@@ -141,25 +172,29 @@ def app_callback(pad, info, user_data: UserApp):
 
 
 # =====================================================================
-# MAIN
+# MAIN EXECUTION
 # =====================================================================
 if __name__ == "__main__":
+    # 1. Parse Arguments
+    parser = get_default_parser()
+    args = parser.parse_args()
 
+    # 2. Force Input to RPi Camera
+    args.input = "rpi"
+
+    # 3. Environment Setup
     script_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.abspath(os.path.join(script_dir, ".."))
     env_file = os.path.join(project_root, ".env")
 
-    print("Loading environment file:", env_file)
+    print(f"[INFO] Loading env: {env_file}")
     os.environ["HAILO_ENV_FILE"] = env_file
-
-    # 🔥 CRITICAL — FORCE CAMERA INPUT
     os.environ["HAILO_PIPELINE_INPUT"] = "rpi"
-    print(">>> Forced input source =", os.getenv("HAILO_PIPELINE_INPUT"))
 
-    # create PTZ + state object
+    # 4. Initialize User Data (PTZ)
     user_data = UserApp()
 
-    print("\n========== STARTING HAILO RPI CAMERA PIPELINE ==========\n")
+    # 5. Run App
+    print("[INFO] Starting Pipeline...")
     app = GStreamerDetectionApp(app_callback, user_data)
-
     app.run()
