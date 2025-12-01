@@ -167,7 +167,12 @@ if __name__ == "__main__":
     env_file = os.path.join(project_root, ".env")
 
     print(f"HAILO_ENV_FILE = {env_file}")
+
     os.environ["HAILO_ENV_FILE"] = env_file
+
+    # DEBUG – print env values we expect
+    print(">>> USING .env FROM:", env_file)
+    print(">>> HAILO_PIPELINE_INPUT =", os.getenv("HAILO_PIPELINE_INPUT"))
 
     # Create user app
     user_data = UserApp()
