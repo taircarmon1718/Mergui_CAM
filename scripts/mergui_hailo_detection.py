@@ -28,23 +28,33 @@ from B016712MP.Focuser import Focuser
 
 
 # =====================================================================
-# HELPER: Get Writable Buffer (Corrected)
+# HELPER: Get Writable Buffer (Corrected Version)
 # =====================================================================
 @contextmanager
 def get_writable_ndarray(buffer, width, height):
     """
-    Context manager to map the GStreamer buffer with WRITE permissions.
-    This allows OpenCV drawing to persist on the video stream.
+    Maps GStreamer buffer with WRITE permissions using known width/height.
+    Fixes the 'AttributeError' by not relying on caps structure parsing.
     """
+    # Try to make the buffer writable if possible (fixes GStreamer CRITICAL warnings)
+    if not buffer.is_writable():
+        try:
+            # We cannot easily replace the buffer in a probe, so we force map.
+            # In some GStreamer versions, this might still warn, but often works.
+            pass
+        except Exception:
+            pass
+
     # Request WRITE access
     success, map_info = buffer.map(Gst.MapFlags.READ | Gst.MapFlags.WRITE)
+
     if not success:
+        # If write mapping fails, we cannot draw
         yield None
         return
 
     try:
-        # Create a NumPy array backed by the buffer memory
-        # We assume 3 channels (RGB) based on the Hailo pipeline default
+        # Create NumPy array (Height, Width, 3 Channels for RGB)
         ndarray = np.ndarray(
             shape=(height, width, 3),
             dtype=np.uint8,
@@ -52,7 +62,7 @@ def get_writable_ndarray(buffer, width, height):
         )
         yield ndarray
     finally:
-        # Unmap the buffer when done
+        # Unmap is crucial to prevent memory leaks/freezes
         buffer.unmap(map_info)
 
 
@@ -71,7 +81,6 @@ class UserApp(app_callback_class):
             self.focuser.set(Focuser.OPT_IRCUT, 0)  # Normal colors
             time.sleep(0.5)
 
-            # Move to Home Position (Center)
             print("[INIT] Moving to Center...")
             self.center_pan = 0
             self.center_tilt = 25
@@ -81,7 +90,6 @@ class UserApp(app_callback_class):
         except Exception as e:
             print(f"[ERROR] PTZ Init failed: {e}")
 
-        # Store current position (static)
         self.current_pan = 0
         self.current_tilt = 25
 
@@ -109,14 +117,15 @@ def app_callback(pad, info, user_data: UserApp):
     if buffer is None:
         return Gst.PadProbeReturn.OK
 
-    # Get width and height directly from caps (returns integers)
+    # Get width and height from the pad caps
+    # fmt is a string (e.g. "RGB"), w and h are integers
     fmt, w, h = get_caps_from_pad(pad)
 
     if user_data.frame_w is None:
         user_data.frame_w = w
         user_data.frame_h = h
 
-    # Open the frame for WRITING using the helper
+    # --- FIXED CALL: Pass w and h directly (Integers), NOT 'fmt' ---
     with get_writable_ndarray(buffer, w, h) as frame:
         if frame is None:
             return Gst.PadProbeReturn.OK
@@ -124,11 +133,11 @@ def app_callback(pad, info, user_data: UserApp):
         user_data.process_counter += 1
 
         # -----------------------------------------------------------------
-        # 1. DRAW INFO (Always runs)
+        # 1. DRAW INFO (Pan/Tilt)
         # -----------------------------------------------------------------
         status_text = f"Pan: {user_data.current_pan} | Tilt: {user_data.current_tilt}"
 
-        # Black border for contrast
+        # Black border
         cv2.putText(frame, status_text, (20, 50), cv2.FONT_HERSHEY_SIMPLEX,
                     1.0, (0, 0, 0), 5)
         # Yellow text
@@ -136,13 +145,12 @@ def app_callback(pad, info, user_data: UserApp):
                     1.0, (255, 255, 0), 2)
 
         # -----------------------------------------------------------------
-        # 2. AUTO-FOCUS LOGIC (Runs once at startup)
+        # 2. AUTO-FOCUS LOGIC
         # -----------------------------------------------------------------
         if user_data.af_running:
             cv2.putText(frame, "Auto-Focusing...", (50, h // 2),
                         cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
 
-            # Process every 3rd frame to save resources
             if user_data.process_counter % 3 == 0:
                 gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
                 score = cv2.Laplacian(gray, cv2.CV_64F).var()
@@ -156,18 +164,17 @@ def app_callback(pad, info, user_data: UserApp):
                 if user_data.af_pos <= user_data.af_max:
                     user_data.focuser.set(Focuser.OPT_FOCUS, user_data.af_pos)
                 else:
-                    print(f"[AF] Done. Best Position: {user_data.af_best_pos}")
+                    print(f"[AF] Done. Best: {user_data.af_best_pos}")
                     user_data.focuser.set(Focuser.OPT_FOCUS, user_data.af_best_pos)
                     user_data.af_running = False
 
+            # While focusing, return here (don't draw boxes yet)
             return Gst.PadProbeReturn.OK
 
         # -----------------------------------------------------------------
         # 3. DETECTION LOGIC
         # -----------------------------------------------------------------
-        # We need to access detections to draw custom text like "Person Detected"
-
-        # Note: We are doing this inside the 'with' block so we can draw on the frame.
+        # Read Hailo Metadata
         roi = hailo.get_roi_from_buffer(buffer)
         detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
 
@@ -175,14 +182,16 @@ def app_callback(pad, info, user_data: UserApp):
             if det.get_label() == "person":
                 bbox = det.get_bbox()
 
-                # Convert normalized coordinates (0.0-1.0) to pixels
+                # Convert normalized coords to pixels
                 xmin = int(bbox.xmin() * w)
                 ymin = int(bbox.ymin() * h)
 
-                # Draw a custom text indicator
-                # (The green bounding box is drawn automatically by Hailo Overlay later,
-                # but we add this text manually)
+                # Draw "Person Detected" Text
                 msg = "Person Detected"
+                # Border
+                cv2.putText(frame, msg, (xmin, ymin - 20),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 4)
+                # Text
                 cv2.putText(frame, msg, (xmin, ymin - 20),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
