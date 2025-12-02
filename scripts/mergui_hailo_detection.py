@@ -12,7 +12,7 @@ gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
 import hailo
 
-# --- HAILO IMPORTS (From the repo you sent) ---
+# --- HAILO IMPORTS ---
 from hailo_apps.hailo_app_python.core.common.buffer_utils import get_caps_from_pad
 from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_app import (
     app_callback_class,
@@ -28,26 +28,27 @@ from B016712MP.Focuser import Focuser
 
 
 # =====================================================================
-# HELPER: Get Writable Buffer (Aligned with Hailo's Utils)
+# HELPER: Get Writable Buffer (FIXED VERSION)
 # =====================================================================
 @contextmanager
 def get_writable_ndarray(buffer, width, height):
     """
-    Maps the GStreamer buffer with WRITE permissions.
-    We pass explicit width/height integers because 'get_caps_from_pad'
-    already parsed the structure for us.
+    Context manager to map the GStreamer buffer with WRITE permissions.
+    We pass width and height explicitly to avoid object parsing errors.
     """
-    # 1. Force the buffer to be writable
-    # This acts as a 'smart pointer' to the video memory
+    # Request WRITE access.
+    # Note: If you see 'GStreamer-CRITICAL' warnings in the terminal,
+    # it is normal for this kind of direct-drawing hack.
     success, map_info = buffer.map(Gst.MapFlags.READ | Gst.MapFlags.WRITE)
 
     if not success:
+        # If mapping fails, we cannot draw, so we yield None
         yield None
         return
 
     try:
-        # 2. Wrap the memory in a NumPy array so OpenCV can use it
-        # We assume 3 channels (RGB) which is standard for Hailo pipelines
+        # Create a NumPy array backed by the buffer memory
+        # We assume 3 channels (RGB)
         ndarray = np.ndarray(
             shape=(height, width, 3),
             dtype=np.uint8,
@@ -55,7 +56,7 @@ def get_writable_ndarray(buffer, width, height):
         )
         yield ndarray
     finally:
-        # 3. CRITICAL: Unmap the buffer so GStreamer can take it back
+        # Crucial: Unmap the buffer so GStreamer can use it again
         buffer.unmap(map_info)
 
 
@@ -84,7 +85,7 @@ class UserApp(app_callback_class):
         except Exception as e:
             print(f"[ERROR] PTZ Init failed: {e}")
 
-        # State Variables
+        # Store current position (static)
         self.current_pan = 0
         self.current_tilt = 25
 
@@ -101,26 +102,25 @@ class UserApp(app_callback_class):
         self.frame_w = None
         self.frame_h = None
 
-        print("[INIT] System Ready. Mode: OSD & Detection.\n")
+        print("[INIT] System Ready. Tracking is DISABLED.\n")
 
 
 # =====================================================================
-# CALLBACK FUNCTION (The 'User Callback' from the Diagram)
+# CALLBACK FUNCTION
 # =====================================================================
 def app_callback(pad, info, user_data: UserApp):
     buffer = info.get_buffer()
     if buffer is None:
         return Gst.PadProbeReturn.OK
 
-    # 1. Use Hailo's utility to get dimensions
-    # This returns: string, int, int (e.g., "RGB", 1280, 720)
+    # Get width (w) and height (h) as Integers directly
     fmt, w, h = get_caps_from_pad(pad)
 
     if user_data.frame_w is None:
         user_data.frame_w = w
         user_data.frame_h = h
 
-    # 2. Open the buffer for WRITING using our helper
+    # --- FIXED CALL: Pass 'w' and 'h' directly ---
     with get_writable_ndarray(buffer, w, h) as frame:
         if frame is None:
             return Gst.PadProbeReturn.OK
@@ -128,90 +128,18 @@ def app_callback(pad, info, user_data: UserApp):
         user_data.process_counter += 1
 
         # -----------------------------------------------------------------
-        # A. DRAW STATUS INFO
+        # 1. DRAW INFO (Always runs)
         # -----------------------------------------------------------------
         status_text = f"Pan: {user_data.current_pan} | Tilt: {user_data.current_tilt}"
 
-        # Black border (Thickness 5)
+        # Black border for contrast
         cv2.putText(frame, status_text, (20, 50), cv2.FONT_HERSHEY_SIMPLEX,
                     1.0, (0, 0, 0), 5)
-        # Yellow text (Thickness 2)
+        # Yellow text
         cv2.putText(frame, status_text, (20, 50), cv2.FONT_HERSHEY_SIMPLEX,
                     1.0, (255, 255, 0), 2)
 
         # -----------------------------------------------------------------
-        # B. AUTO-FOCUS LOGIC
+        # 2. AUTO-FOCUS LOGIC (Runs once at startup)
         # -----------------------------------------------------------------
-        if user_data.af_running:
-            cv2.putText(frame, "Auto-Focusing...", (50, h // 2),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-
-            # Check focus every 3rd frame
-            if user_data.process_counter % 3 == 0:
-                gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
-                score = cv2.Laplacian(gray, cv2.CV_64F).var()
-
-                if score > user_data.af_best_val:
-                    user_data.af_best_val = score
-                    user_data.af_best_pos = user_data.af_pos
-
-                user_data.af_pos += user_data.af_step
-
-                if user_data.af_pos <= user_data.af_max:
-                    user_data.focuser.set(Focuser.OPT_FOCUS, user_data.af_pos)
-                else:
-                    print(f"[AF] Done. Best Position: {user_data.af_best_pos}")
-                    user_data.focuser.set(Focuser.OPT_FOCUS, user_data.af_best_pos)
-                    user_data.af_running = False
-
-            # While focusing, skip detection drawing
-            return Gst.PadProbeReturn.OK
-
-        # -----------------------------------------------------------------
-        # C. DETECTION LOGIC
-        # -----------------------------------------------------------------
-        # We read the metadata that the HAILO chip already put on the buffer
-        roi = hailo.get_roi_from_buffer(buffer)
-        detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
-
-        for det in detections:
-            if det.get_label() == "person":
-                bbox = det.get_bbox()
-
-                # Convert 0.0-1.0 coords to pixels
-                xmin = int(bbox.xmin() * w)
-                ymin = int(bbox.ymin() * h)
-
-                # Draw "Person Detected"
-                msg = "Person Detected"
-                # Border
-                cv2.putText(frame, msg, (xmin, ymin - 20),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 4)
-                # Text
-                cv2.putText(frame, msg, (xmin, ymin - 20),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-
-    return Gst.PadProbeReturn.OK
-
-
-# =====================================================================
-# MAIN EXECUTION
-# =====================================================================
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--input", default="rpi", help="Input source")
-    args, unknown = parser.parse_known_args()
-    args.input = "rpi"
-
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.abspath(os.path.join(script_dir, ".."))
-    env_file = os.path.join(project_root, ".env")
-    os.environ["HAILO_ENV_FILE"] = env_file
-    os.environ["HAILO_PIPELINE_INPUT"] = "rpi"
-
-    print(f"[MAIN] Starting GStreamer Pipeline...")
-    print(f"[MAIN] Mode: Detection Only + OSD")
-
-    user_data = UserApp()
-    app = GStreamerDetectionApp(app_callback, user_data)
-    app.run()
+        if
