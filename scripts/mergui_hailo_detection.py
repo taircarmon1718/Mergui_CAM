@@ -24,41 +24,42 @@ from hailo_apps.hailo_app_python.apps.detection.detection_pipeline import (
 )
 
 # --- PTZ DRIVER IMPORT ---
+# Ensures we can import the Focuser class from the parent directory
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, project_root)
 from B016712MP.Focuser import Focuser
 
 
 # =====================================================================
-# USER APP CLASS
+# USER APP CLASS: Handles Hardware Setup
 # =====================================================================
 class UserApp(app_callback_class):
     def __init__(self):
         super().__init__()
 
-        # --- הגדרות חומרה ומנועים ---
         print("\n[INIT] Initializing PTZ Camera System...")
+
+        # 1. Initialize Motors
         self.focuser = Focuser(1)
-        self.focuser.set(Focuser.OPT_MODE, 1)
+        self.focuser.set(Focuser.OPT_MODE, 1)  # Enable motors
         time.sleep(0.2)
-        self.focuser.set(Focuser.OPT_IRCUT, 0)
+        self.focuser.set(Focuser.OPT_IRCUT, 0)  # Set normal colors
         time.sleep(0.2)
 
-        # איפוס צ'יפ למניעת תקיעות
+        # 2. Reset Chip (Prevent I2C hangs)
         try:
             self.focuser.write(self.focuser.CHIP_I2C_ADDR, 0x11, 0x0001)
         except Exception:
             pass
         time.sleep(0.5)
 
-        # מיקום התחלתי
-        print("[INIT] Moving to Home Position...")
+        # 3. Move to Home Position
+        print("[INIT] Moving to Center...")
         self.focuser.set(Focuser.OPT_MOTOR_X, 0)
-        time.sleep(1.0)
         self.focuser.set(Focuser.OPT_MOTOR_Y, 25)
         time.sleep(1.0)
 
-        # משתני פוקוס
+        # 4. Auto-Focus Variables
         self.af_running = True
         self.af_pos = 0
         self.af_step = 20
@@ -70,48 +71,36 @@ class UserApp(app_callback_class):
         self.frame_w = None
         self.frame_h = None
 
-        print("[INIT] Ready.\n")
+        print("[INIT] System Ready.\n")
 
 
 # =====================================================================
-# CALLBACK FUNCTION
+# CALLBACK FUNCTION: Runs Every Frame
 # =====================================================================
 def app_callback(pad, info, user_data: UserApp):
     buffer = info.get_buffer()
     if buffer is None:
         return Gst.PadProbeReturn.OK
 
+    # Get resolution once
     fmt, w, h = get_caps_from_pad(pad)
     if user_data.frame_w is None:
         user_data.frame_w = w
         user_data.frame_h = h
 
-    # המרת הבאפר לתמונה שאפשר לערוך (numpy array)
-    # הערה: השינויים שנבצע כאן על 'frame' יוצגו על המסך
+    # Get the image frame (Writable NumPy array)
     frame = get_numpy_from_buffer(buffer, fmt, w, h)
 
     # -----------------------------------------------------------------
-    # קריאת נתוני המנועים (בשביל התצוגה)
-    # -----------------------------------------------------------------
-    # אנחנו שמים את זה ב-try כי לפעמים התקשורת I2C נכשלת לרגע
-    try:
-        pan = user_data.focuser.get(Focuser.OPT_MOTOR_X)
-        tilt = user_data.focuser.get(Focuser.OPT_MOTOR_Y)
-        pan_str = str(pan)
-        tilt_str = str(tilt)
-    except:
-        pan_str = "Err"
-        tilt_str = "Err"
-
-    # -----------------------------------------------------------------
-    # שלב 1: פוקוס אוטומטי
+    # PHASE 1: Auto-Focus Logic (Runs first)
     # -----------------------------------------------------------------
     if user_data.af_running:
-        # כתיבה על המסך שאנחנו בפוקוס
-        cv2.putText(frame, f"Auto-Focusing: {user_data.af_pos}", (50, 200),
+        # Draw status on screen
+        cv2.putText(frame, "Auto-Focusing...", (50, h // 2),
                     cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
 
         user_data.af_skip_counter += 1
+        # Process every 3rd frame to let motors move
         if user_data.af_skip_counter % 3 == 0:
             gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
             score = cv2.Laplacian(gray, cv2.CV_64F).var()
@@ -125,53 +114,52 @@ def app_callback(pad, info, user_data: UserApp):
             if user_data.af_pos <= user_data.af_max:
                 user_data.focuser.set(Focuser.OPT_FOCUS, user_data.af_pos)
             else:
-                print(f"[AF] Complete. Best: {user_data.af_best_pos}")
+                print(f"[AF] Focus Found at: {user_data.af_best_pos}")
                 user_data.focuser.set(Focuser.OPT_FOCUS, user_data.af_best_pos)
                 user_data.af_running = False
 
     # -----------------------------------------------------------------
-    # שלב 2: זיהוי והדפסה על המסך (OSD)
+    # PHASE 2: Detection & Drawing
     # -----------------------------------------------------------------
 
-    # 1. קבלת זיהויים מה-Hailo
+    # Get detections from Hailo
     roi = hailo.get_roi_from_buffer(buffer)
     detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
 
-    best_person = None
-    max_area = 0
-
     for det in detections:
+        # We only care about persons
         if det.get_label() == "person":
             bbox = det.get_bbox()
-            area = bbox.width() * bbox.height()
-            if area > max_area:
-                max_area = area
-                best_person = det
 
-    # 2. ציור מידע על המסך (OSD) - החלק שביקשת
-    # צבע צהוב: (0, 255, 255)
+            # Convert 0.0-1.0 coordinates to Pixels
+            xmin = int(bbox.xmin() * w)
+            ymin = int(bbox.ymin() * h)
+            xmax = int(bbox.xmax() * w)
+            ymax = int(bbox.ymax() * h)
 
-    # כותרת למעלה
-    cv2.putText(frame, f"Pan: {pan_str} | Tilt: {tilt_str}", (20, 40),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+            # Draw Green Box
+            cv2.rectangle(frame, (xmin, ymin), (xmax, ymax), (0, 255, 0), 2)
 
-    # אם זוהה בן אדם - נצייר עליו מידע
-    if best_person:
-        bbox = best_person.get_bbox()
-        # המרת קואורדינטות יחסיות (0-1) לפיקסלים
-        xmin = int(bbox.xmin() * w)
-        ymin = int(bbox.ymin() * h)
+            # Draw Label
+            cv2.putText(frame, "Person", (xmin, ymin - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-        # ציור עיגול בפינה של הבן אדם
-        cv2.circle(frame, (xmin, ymin), 10, (0, 255, 0), -1)
+    # -----------------------------------------------------------------
+    # PHASE 3: On-Screen Display (Pan/Tilt Values)
+    # -----------------------------------------------------------------
 
-        # כתיבת טקסט ליד הבן אדם
-        msg = f"Person detected"
-        cv2.putText(frame, msg, (xmin, ymin - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+    # Read motor positions
+    try:
+        pan = user_data.focuser.get(Focuser.OPT_MOTOR_X)
+        tilt = user_data.focuser.get(Focuser.OPT_MOTOR_Y)
+        status_text = f"Pan: {pan} | Tilt: {tilt}"
+    except Exception:
+        status_text = "Pan: Err | Tilt: Err"
 
-        # הדפסה גם לקונסול
-        print(f"Pan: {pan_str} | Tilt: {tilt_str} | Person at X:{xmin} Y:{ymin}")
+    # Draw Yellow Text at the top-left
+    # (Image, Text, Position, Font, Scale, Color(BGR), Thickness)
+    cv2.putText(frame, status_text, (20, 50),
+                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2)
 
     return Gst.PadProbeReturn.OK
 
@@ -185,14 +173,20 @@ if __name__ == "__main__":
     args, unknown = parser.parse_known_args()
     args.input = "rpi"
 
-    # Set Environment
+    # Setup Environment Variables
     script_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.abspath(os.path.join(script_dir, ".."))
     env_file = os.path.join(project_root, ".env")
+
     os.environ["HAILO_ENV_FILE"] = env_file
     os.environ["HAILO_PIPELINE_INPUT"] = "rpi"
 
-    # Start App
+    print(f"[MAIN] Starting GStreamer Pipeline...")
+
     user_data = UserApp()
     app = GStreamerDetectionApp(app_callback, user_data)
-    app.run()
+
+    try:
+        app.run()
+    except KeyboardInterrupt:
+        print("\n[STOP] Stopping...")
