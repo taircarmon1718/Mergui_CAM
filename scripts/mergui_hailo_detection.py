@@ -88,12 +88,21 @@ def app_callback(pad, info, user_data: UserApp):
     # AUTOMATIC MOVEMENT LOGIC (Time-Based)
     # -----------------------------------------------------------
     # 60 frames is approximately 2 seconds (at 30 FPS)
-    if user_data.frame_counter == 60 and not user_data.has_moved_once:
-        print("\n>>> [TIMER] 2 Seconds passed! Moving Camera to Right...")
+    if user_data.frame_counter == 90 and not user_data.has_moved_once:
+        print("\n>>> [TIMER] 3 Seconds passed! Moving Camera to Right...")
 
         # Perform the move (Pan to 300)
-        user_data.focuser.set(Focuser.OPT_MOTOR_X, 300)
+        user_data.focuser.set(Focuser.OPT_MOTOR_X, 90)
 
+        print(">>> [TIMER] Move to 90 Complete.")
+        print(">>> [TIMER] Camera will move BACK to Center in 2 seconds...")
+        time.sleep(2.0)
+        user_data.focuser.set(Focuser.OPT_MOTOR_X, 180)
+        print(">>> [TIMER] Moving Camera back to 180...")
+        time.sleep(2.0)
+        print(">>> [TIMER] Move to Center Complete.")
+        user_data.focuser.set(Focuser.OPT_MOTOR_X, 0)
+        print(">>> [TIMER] Camera will move BACK to Center in 2 seconds...")
         # Mark as done so we don't do it again
         user_data.has_moved_once = True
         print(">>> [TIMER] Move Complete.\n")
