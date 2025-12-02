@@ -7,7 +7,6 @@ import gi
 import cv2
 import numpy as np
 
-from scripts.preview_picamera import auto_focus
 
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
