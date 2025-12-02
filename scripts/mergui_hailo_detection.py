@@ -12,7 +12,6 @@ from gi.repository import Gst, GLib
 import hailo
 
 # --- HAILO IMPORTS ---
-# We use the STANDARD Hailo functions. No custom hacks.
 from hailo_apps.hailo_app_python.core.common.buffer_utils import (
     get_caps_from_pad,
     get_numpy_from_buffer,
@@ -45,7 +44,6 @@ class UserApp(app_callback_class):
             self.focuser.set(Focuser.OPT_IRCUT, 0)
             time.sleep(0.5)
 
-            # Move to Home
             print("[INIT] Moving to Center...")
             self.center_pan = 0
             self.center_tilt = 25
@@ -58,7 +56,16 @@ class UserApp(app_callback_class):
         # State Variables
         self.current_pan = 0
         self.current_tilt = 25
-        self.step_size = 50  # How much to move per key press
+        self.step_size = 50  # Movement speed
+
+        # Create a dummy image for the Controller Window
+        self.control_image = np.zeros((200, 400, 3), dtype=np.uint8)
+        cv2.putText(self.control_image, "CLICK ME TO CONTROL", (20, 50),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        cv2.putText(self.control_image, "A: Left | D: Right", (20, 100),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 1)
+        cv2.putText(self.control_image, "S: Center | Q: Quit", (20, 130),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 1)
 
         # Auto-Focus State
         self.af_running = True
@@ -69,16 +76,16 @@ class UserApp(app_callback_class):
         self.af_best_pos = 0
         self.af_skip_counter = 0
 
+        self.process_counter = 0
         self.frame_w = None
         self.frame_h = None
 
         print("\n" + "=" * 40)
-        print(" CONTROL INSTRUCTIONS:")
-        print(" 1. Click on the video window to focus it.")
-        print(" 2. Press [A] to Move Left")
-        print(" 3. Press [D] to Move Right")
-        print(" 4. Press [S] to Center")
-        print(" 5. Press [Q] to Quit")
+        print(" INSTRUCTIONS:")
+        print(" 1. Two windows will open.")
+        print(" 2. Watch the video in the 'Hailo' window.")
+        print(" 3. CLICK on the small black 'REMOTE CONTROL' window.")
+        print(" 4. Use A / D / S keys to move.")
         print("=" * 40 + "\n")
 
 
@@ -90,87 +97,61 @@ def app_callback(pad, info, user_data: UserApp):
     if buffer is None:
         return Gst.PadProbeReturn.OK
 
-    # 1. Get Image Dimensions (Standard Way)
-    fmt, w, h = get_caps_from_pad(pad)
+    user_data.process_counter += 1
 
-    if user_data.frame_w is None:
-        user_data.frame_w = w
-        user_data.frame_h = h
+    # 1. Show the "Remote Control" window (Dummy window)
+    # This window exists ONLY to capture keyboard presses safely
+    cv2.imshow("Remote Control", user_data.control_image)
 
-    # 2. Get the image SAFELY (Read-Only)
-    # This creates a copy that is safe to touch
-    frame = get_numpy_from_buffer(buffer, fmt, w, h)
-
-    # 3. Convert to BGR for OpenCV display
-    frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-
-    # -----------------------------------------------------------------
-    # DRAWING ON THE COPY (Safe!)
-    # -----------------------------------------------------------------
-    status_text = f"Pan: {user_data.current_pan} | Tilt: {user_data.current_tilt}"
-    cv2.putText(frame_bgr, status_text, (20, 50), cv2.FONT_HERSHEY_SIMPLEX,
-                1.0, (0, 255, 255), 2)
-
-    # -----------------------------------------------------------------
-    # AUTO-FOCUS LOGIC
-    # -----------------------------------------------------------------
-    if user_data.af_running:
-        cv2.putText(frame_bgr, "Auto-Focusing...", (20, 100), cv2.FONT_HERSHEY_SIMPLEX,
-                    1.0, (0, 0, 255), 2)
-
-        user_data.af_skip_counter += 1
-        if user_data.af_skip_counter % 3 == 0:
-            gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-            score = cv2.Laplacian(gray, cv2.CV_64F).var()
-
-            if score > user_data.af_best_val:
-                user_data.af_best_val = score
-                user_data.af_best_pos = user_data.af_pos
-
-            user_data.af_pos += user_data.af_step
-
-            if user_data.af_pos <= user_data.af_max:
-                user_data.focuser.set(Focuser.OPT_FOCUS, user_data.af_pos)
-            else:
-                print(f"[AF] COMPLETE. Best Position: {user_data.af_best_pos}")
-                user_data.focuser.set(Focuser.OPT_FOCUS, user_data.af_best_pos)
-                user_data.af_running = False
-
-    # -----------------------------------------------------------------
-    # MANUAL CONTROL & DISPLAY
-    # -----------------------------------------------------------------
-
-    # Show the video window using OpenCV
-    # This works because we are showing the COPY, not the GStreamer buffer
-    cv2.imshow("Hailo Camera Control", frame_bgr)
-
-    # Wait 1ms for a key press
+    # Read Keyboard (1ms delay)
     key = cv2.waitKey(1) & 0xFF
 
-    # Logic to move motors based on key
+    # 2. Movement Logic
     target_pan = user_data.current_pan
 
     if key == ord('a'):  # Left
         target_pan = max(0, user_data.current_pan - user_data.step_size)
-        print("<< LEFT")
+        print(f"<< LEFT ({target_pan})")
 
     elif key == ord('d'):  # Right
         target_pan = min(1000, user_data.current_pan + user_data.step_size)
-        print("RIGHT >>")
+        print(f"RIGHT >> ({target_pan})")
 
     elif key == ord('s'):  # Center
         target_pan = 0
         print("|| CENTER")
 
     elif key == ord('q'):  # Quit
-        print("Quitting...")
         os._exit(0)
 
-    # Execute Movement if changed
+    # Apply Movement
     if target_pan != user_data.current_pan:
         user_data.focuser.set(Focuser.OPT_MOTOR_X, target_pan)
         user_data.current_pan = target_pan
-        print(f"--> MOVED: Pan={user_data.current_pan}")
+
+    # 3. Auto-Focus Logic (Read-Only from video)
+    if user_data.af_running:
+        if user_data.process_counter % 3 == 0:
+            fmt, w, h = get_caps_from_pad(pad)
+            frame = get_numpy_from_buffer(buffer, fmt, w, h)
+
+            if frame is not None:
+                gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+                score = cv2.Laplacian(gray, cv2.CV_64F).var()
+
+                if score > user_data.af_best_val:
+                    user_data.af_best_val = score
+                    user_data.af_best_pos = user_data.af_pos
+
+                user_data.af_pos += user_data.af_step
+
+                if user_data.af_pos <= user_data.af_max:
+                    user_data.focuser.set(Focuser.OPT_FOCUS, user_data.af_pos)
+                    print(f"[AF] Scanning... {user_data.af_pos}")
+                else:
+                    print(f"[AF] DONE. Best: {user_data.af_best_pos}")
+                    user_data.focuser.set(Focuser.OPT_FOCUS, user_data.af_best_pos)
+                    user_data.af_running = False
 
     return Gst.PadProbeReturn.OK
 
@@ -181,13 +162,8 @@ def app_callback(pad, info, user_data: UserApp):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", default="rpi", help="Input source")
-    # We force the GStreamer sink to be 'fakesink' because we are using
-    # our own cv2.imshow window above. This prevents double windows.
-    parser.add_argument("--video-sink", default="fakesink", help="Video sink")
-
     args, unknown = parser.parse_known_args()
     args.input = "rpi"
-    args.video_sink = "fakesink"
 
     # Setup Environment
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -196,7 +172,7 @@ if __name__ == "__main__":
     os.environ["HAILO_ENV_FILE"] = env_file
     os.environ["HAILO_PIPELINE_INPUT"] = "rpi"
 
-    print(f"[MAIN] Starting Safe Pipeline...")
+    print(f"[MAIN] Starting Pipeline...")
 
     user_data = UserApp()
     app = GStreamerDetectionApp(app_callback, user_data)
