@@ -28,18 +28,14 @@ from B016712MP.Focuser import Focuser
 
 
 # =====================================================================
-# HELPER: Get Writable Buffer (Crucial for OSD)
+# HELPER: Get Writable Buffer (Corrected)
 # =====================================================================
 @contextmanager
-def get_writable_ndarray(buffer, caps):
+def get_writable_ndarray(buffer, width, height):
     """
     Context manager to map the GStreamer buffer with WRITE permissions.
     This allows OpenCV drawing to persist on the video stream.
     """
-    structure = caps.get_structure(0)
-    width = structure.get_value('width')
-    height = structure.get_value('height')
-
     # Request WRITE access
     success, map_info = buffer.map(Gst.MapFlags.READ | Gst.MapFlags.WRITE)
     if not success:
@@ -48,6 +44,7 @@ def get_writable_ndarray(buffer, caps):
 
     try:
         # Create a NumPy array backed by the buffer memory
+        # We assume 3 channels (RGB) based on the Hailo pipeline default
         ndarray = np.ndarray(
             shape=(height, width, 3),
             dtype=np.uint8,
@@ -84,7 +81,7 @@ class UserApp(app_callback_class):
         except Exception as e:
             print(f"[ERROR] PTZ Init failed: {e}")
 
-        # Store current position (static for now, since tracking is off)
+        # Store current position (static)
         self.current_pan = 0
         self.current_tilt = 25
 
@@ -112,13 +109,15 @@ def app_callback(pad, info, user_data: UserApp):
     if buffer is None:
         return Gst.PadProbeReturn.OK
 
+    # Get width and height directly from caps (returns integers)
     fmt, w, h = get_caps_from_pad(pad)
+
     if user_data.frame_w is None:
         user_data.frame_w = w
         user_data.frame_h = h
 
-    # Open the frame for WRITING
-    with get_writable_ndarray(buffer, fmt) as frame:
+    # Open the frame for WRITING using the helper
+    with get_writable_ndarray(buffer, w, h) as frame:
         if frame is None:
             return Gst.PadProbeReturn.OK
 
@@ -143,6 +142,7 @@ def app_callback(pad, info, user_data: UserApp):
             cv2.putText(frame, "Auto-Focusing...", (50, h // 2),
                         cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
 
+            # Process every 3rd frame to save resources
             if user_data.process_counter % 3 == 0:
                 gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
                 score = cv2.Laplacian(gray, cv2.CV_64F).var()
@@ -163,20 +163,11 @@ def app_callback(pad, info, user_data: UserApp):
             return Gst.PadProbeReturn.OK
 
         # -----------------------------------------------------------------
-        # 3. DETECTION LOGIC (No Tracking Movement)
+        # 3. DETECTION LOGIC
         # -----------------------------------------------------------------
+        # We need to access detections to draw custom text like "Person Detected"
 
-        # We need to access detections to know if we should draw "Person Detected"
-        # Note: We must access Hailo metadata OUTSIDE the 'with' block
-        # normally, but since we just need to read, we can do it here carefully,
-        # or just exit the 'with' block before reading.
-        # For OSD, we need to draw inside the 'with', so we read detections first.
-
-        # However, hailo buffer utils usually work better on the raw buffer.
-        # Let's check detections *after* checking if we need to draw specific things?
-        # Actually, to draw ON the frame, we must do it inside this block.
-
-        # Let's get detections using the standard wrapper
+        # Note: We are doing this inside the 'with' block so we can draw on the frame.
         roi = hailo.get_roi_from_buffer(buffer)
         detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
 
@@ -184,18 +175,16 @@ def app_callback(pad, info, user_data: UserApp):
             if det.get_label() == "person":
                 bbox = det.get_bbox()
 
-                # Convert normalized coordinates to pixels
+                # Convert normalized coordinates (0.0-1.0) to pixels
                 xmin = int(bbox.xmin() * w)
                 ymin = int(bbox.ymin() * h)
 
-                # Draw a custom indicator (The green box is drawn by Hailo,
-                # but we add text here)
+                # Draw a custom text indicator
+                # (The green bounding box is drawn automatically by Hailo Overlay later,
+                # but we add this text manually)
                 msg = "Person Detected"
-                cv2.putText(frame, msg, (xmin, ymin - 30),
+                cv2.putText(frame, msg, (xmin, ymin - 20),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-
-                # Tracking logic is REMOVED as requested.
-                # Camera stays static.
 
     return Gst.PadProbeReturn.OK
 
