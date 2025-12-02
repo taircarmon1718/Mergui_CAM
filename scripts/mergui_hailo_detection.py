@@ -42,10 +42,8 @@ class UserApp(app_callback_class):
         super().__init__()
 
         print("\n========== PTZ INITIALIZATION ==========\n")
-
         # Create focuser
         self.focuser = Focuser(1)
-
         # Enable motors
         print("Enabling motors (OPT_MODE = 1)…")
         self.focuser.set(Focuser.OPT_MODE, 1)
@@ -66,7 +64,7 @@ class UserApp(app_callback_class):
 
         # Initial PTZ position
         print("Moving PTZ to initial position…")
-        self.focuser.set(Focuser.OPT_MOTOR_X, 300)
+        self.focuser.set(Focuser.OPT_MOTOR_X, 0)
         time.sleep(1)
         self.focuser.set(Focuser.OPT_MOTOR_Y, 25)
         time.sleep(1)
@@ -86,8 +84,8 @@ class UserApp(app_callback_class):
         # Tracking config
         self.frame_w = None
         self.frame_h = None
-        self.gain_x = 25
-        self.gain_y = 18
+        #self.gain_x = 25
+        #self.gain_y = 18
 
 
 # =====================================================================
