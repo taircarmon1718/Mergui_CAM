@@ -36,7 +36,9 @@ class UserApp(app_callback_class):
     def __init__(self):
         super().__init__()
 
-        print("\n[INIT] Initializing PTZ Camera System...")
+        print("\n" + "=" * 40)
+        print("[INIT] Initializing PTZ Camera...")
+
         try:
             self.focuser = Focuser(1)
             self.focuser.set(Focuser.OPT_MODE, 1)
@@ -44,30 +46,20 @@ class UserApp(app_callback_class):
             self.focuser.set(Focuser.OPT_IRCUT, 0)
             time.sleep(0.5)
 
-            print("[INIT] Moving to Center...")
-            self.center_pan = 0
-            self.center_tilt = 25
-            self.focuser.set(Focuser.OPT_MOTOR_X, self.center_pan)
-            self.focuser.set(Focuser.OPT_MOTOR_Y, self.center_tilt)
+            # 1. Start at CENTER (0)
+            print("[INIT] Setting Home Position (Pan: 0, Tilt: 25)...")
+            self.focuser.set(Focuser.OPT_MOTOR_X, 0)
+            self.focuser.set(Focuser.OPT_MOTOR_Y, 25)
             time.sleep(1.0)
+
         except Exception as e:
             print(f"[ERROR] PTZ Init failed: {e}")
 
-        # State Variables
-        self.current_pan = 0
-        self.current_tilt = 25
-        self.step_size = 50  # Movement speed
+        # Flags for our logic
+        self.frame_counter = 0
+        self.has_moved_once = False  # Flag to ensure we only move once
 
-        # Create a dummy image for the Controller Window
-        self.control_image = np.zeros((200, 400, 3), dtype=np.uint8)
-        cv2.putText(self.control_image, "CLICK ME TO CONTROL", (20, 50),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-        cv2.putText(self.control_image, "A: Left | D: Right", (20, 100),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 1)
-        cv2.putText(self.control_image, "S: Center | Q: Quit", (20, 130),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 1)
-
-        # Auto-Focus State
+        # Auto-Focus variables
         self.af_running = True
         self.af_pos = 0
         self.af_step = 20
@@ -75,64 +67,45 @@ class UserApp(app_callback_class):
         self.af_best_val = 0.0
         self.af_best_pos = 0
         self.af_skip_counter = 0
+        self.af_finished = False
 
-        self.process_counter = 0
-        self.frame_w = None
-        self.frame_h = None
-
-        print("\n" + "=" * 40)
-        print(" INSTRUCTIONS:")
-        print(" 1. Two windows will open.")
-        print(" 2. Watch the video in the 'Hailo' window.")
-        print(" 3. CLICK on the small black 'REMOTE CONTROL' window.")
-        print(" 4. Use A / D / S keys to move.")
+        print("[INIT] Ready. Camera will move RIGHT in ~2 seconds.")
         print("=" * 40 + "\n")
 
 
 # =====================================================================
-# CALLBACK FUNCTION
+# CALLBACK FUNCTION (Runs ~30 times per second)
 # =====================================================================
 def app_callback(pad, info, user_data: UserApp):
     buffer = info.get_buffer()
     if buffer is None:
         return Gst.PadProbeReturn.OK
 
-    user_data.process_counter += 1
+    # Increment frame counter
+    user_data.frame_counter += 1
 
-    # 1. Show the "Remote Control" window (Dummy window)
-    # This window exists ONLY to capture keyboard presses safely
-    cv2.imshow("Remote Control", user_data.control_image)
+    # -----------------------------------------------------------
+    # AUTOMATIC MOVEMENT LOGIC (Time-Based)
+    # -----------------------------------------------------------
+    # 60 frames is approximately 2 seconds (at 30 FPS)
+    if user_data.frame_counter == 60 and not user_data.has_moved_once:
+        print("\n>>> [TIMER] 2 Seconds passed! Moving Camera to Right...")
 
-    # Read Keyboard (1ms delay)
-    key = cv2.waitKey(1) & 0xFF
+        # Perform the move (Pan to 300)
+        user_data.focuser.set(Focuser.OPT_MOTOR_X, 300)
 
-    # 2. Movement Logic
-    target_pan = user_data.current_pan
+        # Mark as done so we don't do it again
+        user_data.has_moved_once = True
+        print(">>> [TIMER] Move Complete.\n")
 
-    if key == ord('a'):  # Left
-        target_pan = max(0, user_data.current_pan - user_data.step_size)
-        print(f"<< LEFT ({target_pan})")
-
-    elif key == ord('d'):  # Right
-        target_pan = min(1000, user_data.current_pan + user_data.step_size)
-        print(f"RIGHT >> ({target_pan})")
-
-    elif key == ord('s'):  # Center
-        target_pan = 0
-        print("|| CENTER")
-
-    elif key == ord('q'):  # Quit
-        os._exit(0)
-
-    # Apply Movement
-    if target_pan != user_data.current_pan:
-        user_data.focuser.set(Focuser.OPT_MOTOR_X, target_pan)
-        user_data.current_pan = target_pan
-
-    # 3. Auto-Focus Logic (Read-Only from video)
-    if user_data.af_running:
-        if user_data.process_counter % 3 == 0:
+    # -----------------------------------------------------------
+    # AUTO-FOCUS LOGIC
+    # -----------------------------------------------------------
+    if user_data.af_running and not user_data.af_finished:
+        if user_data.frame_counter % 3 == 0:
             fmt, w, h = get_caps_from_pad(pad)
+
+            # Read-Only access (Safe)
             frame = get_numpy_from_buffer(buffer, fmt, w, h)
 
             if frame is not None:
@@ -147,10 +120,10 @@ def app_callback(pad, info, user_data: UserApp):
 
                 if user_data.af_pos <= user_data.af_max:
                     user_data.focuser.set(Focuser.OPT_FOCUS, user_data.af_pos)
-                    print(f"[AF] Scanning... {user_data.af_pos}")
                 else:
-                    print(f"[AF] DONE. Best: {user_data.af_best_pos}")
+                    print(f"[AF] DONE. Best Focus: {user_data.af_best_pos}")
                     user_data.focuser.set(Focuser.OPT_FOCUS, user_data.af_best_pos)
+                    user_data.af_finished = True
                     user_data.af_running = False
 
     return Gst.PadProbeReturn.OK
@@ -165,7 +138,6 @@ if __name__ == "__main__":
     args, unknown = parser.parse_known_args()
     args.input = "rpi"
 
-    # Setup Environment
     script_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.abspath(os.path.join(script_dir, ".."))
     env_file = os.path.join(project_root, ".env")
