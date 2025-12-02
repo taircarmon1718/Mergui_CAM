@@ -7,6 +7,7 @@ import gi
 import cv2
 import numpy as np
 
+from scripts.preview_picamera import auto_focus
 
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
@@ -28,8 +29,8 @@ from hailo_apps.hailo_app_python.apps.detection.detection_pipeline import (
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, project_root)
 from B016712MP.Focuser import Focuser
-from B016712MP.AutoFocus import AutoFocus
-from B016712MP.RpiCamera import Camera
+
+
 
 # =====================================================================
 # USER APP CLASS
@@ -43,7 +44,6 @@ class UserApp(app_callback_class):
         print("[INIT] Initializing PTZ Camera...")
 
         try:
-            self.camera = Camera()
             self.focuser = Focuser(1)
             self.focuser.set(Focuser.OPT_MODE, 1)
             time.sleep(0.2)
@@ -97,15 +97,17 @@ def app_callback(pad, info, user_data: UserApp):
 
         # Perform the move (Pan to 300)
         user_data.focuser.set(Focuser.OPT_MOTOR_X, 0)
-        auto_focus = AutoFocus(user_data.focuser, user_data.camera)
-        auto_focus.debug = False
-        max_index, max_value = auto_focus.startFocus2()
-        print(f">>> [TIMER] AutoFocus completed: index={max_index}, value={max_value}")
+        #trying to do focus
         time.sleep(0.5)
+        fmt ,w ,h = get_caps_from_pad(pad)
+        frame = get_numpy_from_buffer(buffer, fmt, w, h)
+        gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+        score = cv2.Laplacian(gray, cv2.CV_64F).var()
+        print(f"Initial Focus Score at position 0: {score}")
 
-
-
-
+        user_data.focuser.set(Focuser.OPT_FOCUS, score)
+        time.sleep(2.0)  # Wait for movement to complete
+        print(">>> [TIMER] Move Complete.\n")
 
     # -----------------------------------------------------------
     # AUTO-FOCUS LOGIC
