@@ -31,8 +31,6 @@ from B016712MP.Focuser import Focuser
 from B016712MP.AutoFocus import AutoFocus
 from B016712MP.RpiCamera import Camera
 
-
-
 # =====================================================================
 # USER APP CLASS
 # =====================================================================
