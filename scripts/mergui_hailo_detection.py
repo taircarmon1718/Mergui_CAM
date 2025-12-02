@@ -37,21 +37,23 @@ class UserApp(app_callback_class):
         super().__init__()
 
         print("\n[INIT] Initializing PTZ Camera System...")
-        try:
-            self.focuser = Focuser(1)
-            self.focuser.set(Focuser.OPT_MODE, 1)
-            time.sleep(0.2)
-            self.focuser.set(Focuser.OPT_IRCUT, 0)
-            time.sleep(0.5)
+        self.focuser = Focuser(1)
+        self.focuser.set(Focuser.OPT_MODE, 1)
+        time.sleep(0.2)
+        self.focuser.set(Focuser.OPT_IRCUT, 0)
+        time.sleep(0.5)
 
-            # Move to Center
-            print("[INIT] Moving to Center...")
-            self.focuser.set(Focuser.OPT_MOTOR_X, 0)
-            self.focuser.set(Focuser.OPT_MOTOR_Y, 25)
-            time.sleep(1.0)
+        # Move to Center
+        print("[INIT] Moving to Center...")
+        self.center_pan = 0
+        self.center_tilt = 25
+        self.focuser.set(Focuser.OPT_MOTOR_X, self.center_pan)
+        self.focuser.set(Focuser.OPT_MOTOR_Y, self.center_tilt)
+        time.sleep(1.0)
 
-        except Exception as e:
-            print(f"[ERROR] PTZ Init: {e}")
+        # We keep track of position in variables to avoid reading from hardware (fixes lag)
+        self.current_pan = self.center_pan
+        self.current_tilt = self.center_tilt
 
         # Auto-Focus variables
         self.af_running = True
@@ -63,17 +65,18 @@ class UserApp(app_callback_class):
         self.af_skip_counter = 0
 
         # Tracking variables
-        self.gain_x = 20  # Sensitivity X
-        self.gain_y = 15  # Sensitivity Y
+        self.gain_x = 15
+        self.gain_y = 10
+        self.process_skip = 0
 
         self.frame_w = None
         self.frame_h = None
 
-        print("[INIT] Ready. Watch the GStreamer window.\n")
+        print("[INIT] Ready.\n")
 
 
 # =====================================================================
-# CALLBACK FUNCTION (Runs every frame)
+# CALLBACK FUNCTION
 # =====================================================================
 def app_callback(pad, info, user_data: UserApp):
     buffer = info.get_buffer()
@@ -85,18 +88,13 @@ def app_callback(pad, info, user_data: UserApp):
         user_data.frame_w = w
         user_data.frame_h = h
 
-    # 1. Get the image (This is the actual video frame)
-    # We modify this array, and GStreamer will show the modifications!
+    # Get the image to draw on
     frame = get_numpy_from_buffer(buffer, fmt, w, h)
 
     # -----------------------------------------------------------------
     # PHASE 1: Auto-Focus
     # -----------------------------------------------------------------
     if user_data.af_running:
-        # Draw status directly on the frame
-        cv2.putText(frame, "Auto-Focusing...", (50, h // 2),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
-
         user_data.af_skip_counter += 1
         if user_data.af_skip_counter % 3 == 0:
             gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
@@ -115,11 +113,26 @@ def app_callback(pad, info, user_data: UserApp):
                 user_data.focuser.set(Focuser.OPT_FOCUS, user_data.af_best_pos)
                 user_data.af_running = False
 
+        # Draw AF status
+        cv2.putText(frame, "Auto-Focusing...", (50, h // 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
         return Gst.PadProbeReturn.OK
 
     # -----------------------------------------------------------------
-    # PHASE 2: Detection & Tracking (Automatic)
+    # PHASE 2: Detection & Tracking
     # -----------------------------------------------------------------
+
+    # Optimization: Run tracking logic only every 2nd frame
+    user_data.process_skip += 1
+
+    # Always DRAW the text (using saved variables) - This is fast!
+    cv2.putText(frame, f"Pan: {user_data.current_pan} | Tilt: {user_data.current_tilt}",
+                (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 0), 2)
+
+    # Only do the heavy lifting (detection/movement) every few frames
+    if user_data.process_skip % 2 != 0:
+        return Gst.PadProbeReturn.OK
+
     roi = hailo.get_roi_from_buffer(buffer)
     detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
 
@@ -135,53 +148,35 @@ def app_callback(pad, info, user_data: UserApp):
                 best_person = det
 
     if best_person:
-        # --- TRACKING LOGIC ---
         bbox = best_person.get_bbox()
         cx = bbox.xmin() + (bbox.width() / 2)
         cy = bbox.ymin() + (bbox.height() / 2)
 
-        # Calculate Error (Center is 0.5, 0.5)
+        # Calculate Error
         err_x = cx - 0.5
         err_y = cy - 0.5
 
-        # Current Motor Positions
-        try:
-            curr_pan = user_data.focuser.get(Focuser.OPT_MOTOR_X)
-            curr_tilt = user_data.focuser.get(Focuser.OPT_MOTOR_Y)
-        except:
-            curr_pan, curr_tilt = 0, 0
+        # Only move if error is significant (prevent jitter)
+        if abs(err_x) > 0.04 or abs(err_y) > 0.04:
+            # Calculate new position
+            new_pan = int(user_data.current_pan - (err_x * user_data.gain_x))
+            new_tilt = int(user_data.current_tilt - (err_y * user_data.gain_y))
 
-        # Calculate New Positions
-        new_pan = int(curr_pan - (err_x * user_data.gain_x))  # Minus to correct direction
-        new_tilt = int(curr_tilt - (err_y * user_data.gain_y))
+            # Clamp limits
+            new_pan = max(0, min(1000, new_pan))
+            new_tilt = max(0, min(1000, new_tilt))
 
-        # Clamp limits
-        new_pan = max(0, min(1000, new_pan))
-        new_tilt = max(0, min(1000, new_tilt))
+            # Move Motor
+            user_data.focuser.set(Focuser.OPT_MOTOR_X, new_pan)
+            user_data.focuser.set(Focuser.OPT_MOTOR_Y, new_tilt)
 
-        # Move Motors
-        user_data.focuser.set(Focuser.OPT_MOTOR_X, new_pan)
-        user_data.focuser.set(Focuser.OPT_MOTOR_Y, new_tilt)
+            # Update variables for display
+            user_data.current_pan = new_pan
+            user_data.current_tilt = new_tilt
 
-        # Draw "TRACKING" on screen
-        cv2.putText(frame, "TRACKING PERSON", (int(bbox.xmin() * w), int(bbox.ymin() * h) - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-
-    # -----------------------------------------------------------------
-    # PHASE 3: OSD (Print Pan/Tilt on GStreamer Screen)
-    # -----------------------------------------------------------------
-    try:
-        pan_val = user_data.focuser.get(Focuser.OPT_MOTOR_X)
-        tilt_val = user_data.focuser.get(Focuser.OPT_MOTOR_Y)
-    except:
-        pan_val, tilt_val = "Err", "Err"
-
-    # We write directly to 'frame' which GStreamer will display
-    # Color (255, 255, 0) is Yellow/Cyan in RGB depending on format, usually visible
-    status_text = f"Pan: {pan_val} | Tilt: {tilt_val}"
-
-    cv2.putText(frame, status_text, (20, 50),
-                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 0), 2)
+            # Draw "Tracking" indicator
+            cv2.putText(frame, "TRACKING", (int(bbox.xmin() * w), int(bbox.ymin() * h) - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
     return Gst.PadProbeReturn.OK
 
@@ -193,7 +188,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", default="rpi", help="Input source")
     args, unknown = parser.parse_known_args()
-
     args.input = "rpi"
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
