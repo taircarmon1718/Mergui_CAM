@@ -6,14 +6,16 @@ import argparse
 import gi
 import cv2
 import numpy as np
-from contextlib import contextmanager
 
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
 import hailo
 
 # --- HAILO IMPORTS ---
-from hailo_apps.hailo_app_python.core.common.buffer_utils import get_caps_from_pad
+from hailo_apps.hailo_app_python.core.common.buffer_utils import (
+    get_caps_from_pad,
+    get_numpy_from_buffer,
+)
 from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_app import (
     app_callback_class,
 )
@@ -28,39 +30,6 @@ from B016712MP.Focuser import Focuser
 
 
 # =====================================================================
-# HELPER: Get Writable Buffer (FIXED VERSION)
-# =====================================================================
-@contextmanager
-def get_writable_ndarray(buffer, width, height):
-    """
-    Context manager to map the GStreamer buffer with WRITE permissions.
-    We pass width and height explicitly to avoid object parsing errors.
-    """
-    # Request WRITE access.
-    # Note: If you see 'GStreamer-CRITICAL' warnings in the terminal,
-    # it is normal for this kind of direct-drawing hack.
-    success, map_info = buffer.map(Gst.MapFlags.READ | Gst.MapFlags.WRITE)
-
-    if not success:
-        # If mapping fails, we cannot draw, so we yield None
-        yield None
-        return
-
-    try:
-        # Create a NumPy array backed by the buffer memory
-        # We assume 3 channels (RGB)
-        ndarray = np.ndarray(
-            shape=(height, width, 3),
-            dtype=np.uint8,
-            buffer=map_info.data
-        )
-        yield ndarray
-    finally:
-        # Crucial: Unmap the buffer so GStreamer can use it again
-        buffer.unmap(map_info)
-
-
-# =====================================================================
 # USER APP CLASS
 # =====================================================================
 class UserApp(app_callback_class):
@@ -72,10 +41,10 @@ class UserApp(app_callback_class):
             self.focuser = Focuser(1)
             self.focuser.set(Focuser.OPT_MODE, 1)
             time.sleep(0.2)
-            self.focuser.set(Focuser.OPT_IRCUT, 0)  # Normal colors
+            self.focuser.set(Focuser.OPT_IRCUT, 0)
             time.sleep(0.5)
 
-            # Move to Home Position (Center)
+            # Move to Home
             print("[INIT] Moving to Center...")
             self.center_pan = 0
             self.center_tilt = 25
@@ -85,9 +54,10 @@ class UserApp(app_callback_class):
         except Exception as e:
             print(f"[ERROR] PTZ Init failed: {e}")
 
-        # Store current position (static)
+        # State Variables
         self.current_pan = 0
         self.current_tilt = 25
+        self.step_size = 50  # How much to move per key press
 
         # Auto-Focus State
         self.af_running = True
@@ -98,11 +68,17 @@ class UserApp(app_callback_class):
         self.af_best_pos = 0
         self.af_skip_counter = 0
 
-        self.process_counter = 0
         self.frame_w = None
         self.frame_h = None
 
-        print("[INIT] System Ready. Tracking is DISABLED.\n")
+        print("\n" + "=" * 40)
+        print(" CONTROL INSTRUCTIONS:")
+        print(" Click on the video window to focus it.")
+        print(" [A]  <- Move Left")
+        print(" [D]  -> Move Right")
+        print(" [S]  -- Center Camera")
+        print(" [Q]  -- Quit")
+        print("=" * 40 + "\n")
 
 
 # =====================================================================
@@ -113,85 +89,81 @@ def app_callback(pad, info, user_data: UserApp):
     if buffer is None:
         return Gst.PadProbeReturn.OK
 
-    # Get width (w) and height (h) as Integers directly
+    # Standard Hailo utils (Safe, Read-Only)
     fmt, w, h = get_caps_from_pad(pad)
 
     if user_data.frame_w is None:
         user_data.frame_w = w
         user_data.frame_h = h
 
-    # --- FIXED CALL: Pass 'w' and 'h' directly ---
-    with get_writable_ndarray(buffer, w, h) as frame:
-        if frame is None:
-            return Gst.PadProbeReturn.OK
+    # Get the image for display (Read-Only)
+    frame = get_numpy_from_buffer(buffer, fmt, w, h)
 
-        user_data.process_counter += 1
+    # Convert RGB to BGR for OpenCV display
+    frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
-        # -----------------------------------------------------------------
-        # 1. DRAW INFO (Always runs)
-        # -----------------------------------------------------------------
-        status_text = f"Pan: {user_data.current_pan} | Tilt: {user_data.current_tilt}"
+    # -----------------------------------------------------------------
+    # 1. AUTO-FOCUS LOGIC
+    # -----------------------------------------------------------------
+    if user_data.af_running:
+        user_data.af_skip_counter += 1
+        # Check focus every 3rd frame
+        if user_data.af_skip_counter % 3 == 0:
+            gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+            score = cv2.Laplacian(gray, cv2.CV_64F).var()
 
-        # Black border for contrast
-        cv2.putText(frame, status_text, (20, 50), cv2.FONT_HERSHEY_SIMPLEX,
-                    1.0, (0, 0, 0), 5)
-        # Yellow text
-        cv2.putText(frame, status_text, (20, 50), cv2.FONT_HERSHEY_SIMPLEX,
-                    1.0, (255, 255, 0), 2)
+            if score > user_data.af_best_val:
+                user_data.af_best_val = score
+                user_data.af_best_pos = user_data.af_pos
 
-        # -----------------------------------------------------------------
-        # 2. AUTO-FOCUS LOGIC (Runs once at startup)
-        # -----------------------------------------------------------------
-        if user_data.af_running:
-            cv2.putText(frame, "Auto-Focusing...", (50, h // 2),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+            user_data.af_pos += user_data.af_step
 
-            # Process every 3rd frame to save resources
-            if user_data.process_counter % 3 == 0:
-                gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
-                score = cv2.Laplacian(gray, cv2.CV_64F).var()
+            if user_data.af_pos <= user_data.af_max:
+                user_data.focuser.set(Focuser.OPT_FOCUS, user_data.af_pos)
+                print(f"[AF] Scanning... Pos: {user_data.af_pos} Score: {score:.1f}")
+            else:
+                print(f"[AF] COMPLETE. Best Position: {user_data.af_best_pos}")
+                user_data.focuser.set(Focuser.OPT_FOCUS, user_data.af_best_pos)
+                user_data.af_running = False
 
-                if score > user_data.af_best_val:
-                    user_data.af_best_val = score
-                    user_data.af_best_pos = user_data.af_pos
+    # -----------------------------------------------------------------
+    # 2. MANUAL CONTROL & DISPLAY
+    # -----------------------------------------------------------------
 
-                user_data.af_pos += user_data.af_step
+    # Show the video window
+    # We MUST show a window to capture keyboard events with cv2.waitKey
+    cv2.imshow("Hailo Camera Control", frame_bgr)
 
-                if user_data.af_pos <= user_data.af_max:
-                    user_data.focuser.set(Focuser.OPT_FOCUS, user_data.af_pos)
-                else:
-                    print(f"[AF] Done. Best Position: {user_data.af_best_pos}")
-                    user_data.focuser.set(Focuser.OPT_FOCUS, user_data.af_best_pos)
-                    user_data.af_running = False
+    # Wait 1ms for a key press
+    key = cv2.waitKey(1) & 0xFF
 
-            # While focusing, skip detection drawing
-            return Gst.PadProbeReturn.OK
+    # Logic to move motors based on key
+    target_pan = user_data.current_pan
 
-        # -----------------------------------------------------------------
-        # 3. DETECTION LOGIC
-        # -----------------------------------------------------------------
-        # We need to access detections to draw custom text
+    if key == ord('a'):  # Left
+        target_pan = max(0, user_data.current_pan - user_data.step_size)
+        print("<< LEFT")
 
-        # Note: We are doing this inside the 'with' block so we can draw on the frame.
-        roi = hailo.get_roi_from_buffer(buffer)
-        detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
+    elif key == ord('d'):  # Right
+        target_pan = min(1000, user_data.current_pan + user_data.step_size)
+        print("RIGHT >>")
 
-        for det in detections:
-            if det.get_label() == "person":
-                bbox = det.get_bbox()
+    elif key == ord('s'):  # Center
+        target_pan = 0
+        user_data.focuser.set(Focuser.OPT_MOTOR_Y, 25)  # Reset Tilt too
+        print("|| CENTER")
 
-                # Convert normalized coordinates (0.0-1.0) to pixels
-                xmin = int(bbox.xmin() * w)
-                ymin = int(bbox.ymin() * h)
+    elif key == ord('q'):  # Quit
+        print("Quitting...")
+        os._exit(0)
 
-                # Draw "Person Detected" Text
-                msg = "Person Detected"
-                # Black Border
-                cv2.putText(frame, msg, (xmin, ymin - 20),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 4)
-                # Green Text
-                cv2.putText(frame, msg, (xmin, ymin - 20),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+    # Execute Movement if changed
+    if target_pan != user_data.current_pan:
+        user_data.focuser.set(Focuser.OPT_MOTOR_X, target_pan)
+        user_data.current_pan = target_pan
+
+        # Print Status to Terminal
+        print(f"--> STATUS: Pan={user_data.current_pan} | Tilt={user_data.current_tilt}")
 
     return Gst.PadProbeReturn.OK
 
@@ -205,6 +177,7 @@ if __name__ == "__main__":
     args, unknown = parser.parse_known_args()
     args.input = "rpi"
 
+    # Setup Environment
     script_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.abspath(os.path.join(script_dir, ".."))
     env_file = os.path.join(project_root, ".env")
@@ -212,8 +185,11 @@ if __name__ == "__main__":
     os.environ["HAILO_PIPELINE_INPUT"] = "rpi"
 
     print(f"[MAIN] Starting GStreamer Pipeline...")
-    print(f"[MAIN] Mode: Detection Only + OSD (No Tracking)")
 
     user_data = UserApp()
     app = GStreamerDetectionApp(app_callback, user_data)
-    app.run()
+
+    try:
+        app.run()
+    except KeyboardInterrupt:
+        pass
