@@ -142,4 +142,78 @@ def app_callback(pad, info, user_data: UserApp):
         # -----------------------------------------------------------------
         # 2. AUTO-FOCUS LOGIC (Runs once at startup)
         # -----------------------------------------------------------------
-        if
+        if user_data.af_running:
+            cv2.putText(frame, "Auto-Focusing...", (50, h // 2),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+
+            # Process every 3rd frame to save resources
+            if user_data.process_counter % 3 == 0:
+                gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+                score = cv2.Laplacian(gray, cv2.CV_64F).var()
+
+                if score > user_data.af_best_val:
+                    user_data.af_best_val = score
+                    user_data.af_best_pos = user_data.af_pos
+
+                user_data.af_pos += user_data.af_step
+
+                if user_data.af_pos <= user_data.af_max:
+                    user_data.focuser.set(Focuser.OPT_FOCUS, user_data.af_pos)
+                else:
+                    print(f"[AF] Done. Best Position: {user_data.af_best_pos}")
+                    user_data.focuser.set(Focuser.OPT_FOCUS, user_data.af_best_pos)
+                    user_data.af_running = False
+
+            # While focusing, skip detection drawing
+            return Gst.PadProbeReturn.OK
+
+        # -----------------------------------------------------------------
+        # 3. DETECTION LOGIC
+        # -----------------------------------------------------------------
+        # We need to access detections to draw custom text
+
+        # Note: We are doing this inside the 'with' block so we can draw on the frame.
+        roi = hailo.get_roi_from_buffer(buffer)
+        detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
+
+        for det in detections:
+            if det.get_label() == "person":
+                bbox = det.get_bbox()
+
+                # Convert normalized coordinates (0.0-1.0) to pixels
+                xmin = int(bbox.xmin() * w)
+                ymin = int(bbox.ymin() * h)
+
+                # Draw "Person Detected" Text
+                msg = "Person Detected"
+                # Black Border
+                cv2.putText(frame, msg, (xmin, ymin - 20),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 4)
+                # Green Text
+                cv2.putText(frame, msg, (xmin, ymin - 20),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+    return Gst.PadProbeReturn.OK
+
+
+# =====================================================================
+# MAIN EXECUTION
+# =====================================================================
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input", default="rpi", help="Input source")
+    args, unknown = parser.parse_known_args()
+    args.input = "rpi"
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.abspath(os.path.join(script_dir, ".."))
+    env_file = os.path.join(project_root, ".env")
+    os.environ["HAILO_ENV_FILE"] = env_file
+    os.environ["HAILO_PIPELINE_INPUT"] = "rpi"
+
+    print(f"[MAIN] Starting GStreamer Pipeline...")
+    print(f"[MAIN] Mode: Detection Only + OSD (No Tracking)")
+
+    user_data = UserApp()
+    app = GStreamerDetectionApp(app_callback, user_data)
+    app.run()
