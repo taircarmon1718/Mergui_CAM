@@ -84,8 +84,8 @@ class UserApp(app_callback_class):
         # Tracking config
         self.frame_w = None
         self.frame_h = None
-        #self.gain_x = 25
-        #self.gain_y = 18
+        self.gain_x = 25
+        self.gain_y = 18
 
 
 # =====================================================================
