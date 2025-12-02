@@ -12,7 +12,7 @@ gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
 import hailo
 
-# --- HAILO IMPORTS ---
+# --- HAILO IMPORTS (From the repo you sent) ---
 from hailo_apps.hailo_app_python.core.common.buffer_utils import get_caps_from_pad
 from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_app import (
     app_callback_class,
@@ -28,33 +28,26 @@ from B016712MP.Focuser import Focuser
 
 
 # =====================================================================
-# HELPER: Get Writable Buffer (Corrected Version)
+# HELPER: Get Writable Buffer (Aligned with Hailo's Utils)
 # =====================================================================
 @contextmanager
 def get_writable_ndarray(buffer, width, height):
     """
-    Maps GStreamer buffer with WRITE permissions using known width/height.
-    Fixes the 'AttributeError' by not relying on caps structure parsing.
+    Maps the GStreamer buffer with WRITE permissions.
+    We pass explicit width/height integers because 'get_caps_from_pad'
+    already parsed the structure for us.
     """
-    # Try to make the buffer writable if possible (fixes GStreamer CRITICAL warnings)
-    if not buffer.is_writable():
-        try:
-            # We cannot easily replace the buffer in a probe, so we force map.
-            # In some GStreamer versions, this might still warn, but often works.
-            pass
-        except Exception:
-            pass
-
-    # Request WRITE access
+    # 1. Force the buffer to be writable
+    # This acts as a 'smart pointer' to the video memory
     success, map_info = buffer.map(Gst.MapFlags.READ | Gst.MapFlags.WRITE)
 
     if not success:
-        # If write mapping fails, we cannot draw
         yield None
         return
 
     try:
-        # Create NumPy array (Height, Width, 3 Channels for RGB)
+        # 2. Wrap the memory in a NumPy array so OpenCV can use it
+        # We assume 3 channels (RGB) which is standard for Hailo pipelines
         ndarray = np.ndarray(
             shape=(height, width, 3),
             dtype=np.uint8,
@@ -62,7 +55,7 @@ def get_writable_ndarray(buffer, width, height):
         )
         yield ndarray
     finally:
-        # Unmap is crucial to prevent memory leaks/freezes
+        # 3. CRITICAL: Unmap the buffer so GStreamer can take it back
         buffer.unmap(map_info)
 
 
@@ -81,6 +74,7 @@ class UserApp(app_callback_class):
             self.focuser.set(Focuser.OPT_IRCUT, 0)  # Normal colors
             time.sleep(0.5)
 
+            # Move to Home Position (Center)
             print("[INIT] Moving to Center...")
             self.center_pan = 0
             self.center_tilt = 25
@@ -90,6 +84,7 @@ class UserApp(app_callback_class):
         except Exception as e:
             print(f"[ERROR] PTZ Init failed: {e}")
 
+        # State Variables
         self.current_pan = 0
         self.current_tilt = 25
 
@@ -106,26 +101,26 @@ class UserApp(app_callback_class):
         self.frame_w = None
         self.frame_h = None
 
-        print("[INIT] System Ready. Tracking is DISABLED.\n")
+        print("[INIT] System Ready. Mode: OSD & Detection.\n")
 
 
 # =====================================================================
-# CALLBACK FUNCTION
+# CALLBACK FUNCTION (The 'User Callback' from the Diagram)
 # =====================================================================
 def app_callback(pad, info, user_data: UserApp):
     buffer = info.get_buffer()
     if buffer is None:
         return Gst.PadProbeReturn.OK
 
-    # Get width and height from the pad caps
-    # fmt is a string (e.g. "RGB"), w and h are integers
+    # 1. Use Hailo's utility to get dimensions
+    # This returns: string, int, int (e.g., "RGB", 1280, 720)
     fmt, w, h = get_caps_from_pad(pad)
 
     if user_data.frame_w is None:
         user_data.frame_w = w
         user_data.frame_h = h
 
-    # --- FIXED CALL: Pass w and h directly (Integers), NOT 'fmt' ---
+    # 2. Open the buffer for WRITING using our helper
     with get_writable_ndarray(buffer, w, h) as frame:
         if frame is None:
             return Gst.PadProbeReturn.OK
@@ -133,24 +128,25 @@ def app_callback(pad, info, user_data: UserApp):
         user_data.process_counter += 1
 
         # -----------------------------------------------------------------
-        # 1. DRAW INFO (Pan/Tilt)
+        # A. DRAW STATUS INFO
         # -----------------------------------------------------------------
         status_text = f"Pan: {user_data.current_pan} | Tilt: {user_data.current_tilt}"
 
-        # Black border
+        # Black border (Thickness 5)
         cv2.putText(frame, status_text, (20, 50), cv2.FONT_HERSHEY_SIMPLEX,
                     1.0, (0, 0, 0), 5)
-        # Yellow text
+        # Yellow text (Thickness 2)
         cv2.putText(frame, status_text, (20, 50), cv2.FONT_HERSHEY_SIMPLEX,
                     1.0, (255, 255, 0), 2)
 
         # -----------------------------------------------------------------
-        # 2. AUTO-FOCUS LOGIC
+        # B. AUTO-FOCUS LOGIC
         # -----------------------------------------------------------------
         if user_data.af_running:
             cv2.putText(frame, "Auto-Focusing...", (50, h // 2),
                         cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
 
+            # Check focus every 3rd frame
             if user_data.process_counter % 3 == 0:
                 gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
                 score = cv2.Laplacian(gray, cv2.CV_64F).var()
@@ -164,17 +160,17 @@ def app_callback(pad, info, user_data: UserApp):
                 if user_data.af_pos <= user_data.af_max:
                     user_data.focuser.set(Focuser.OPT_FOCUS, user_data.af_pos)
                 else:
-                    print(f"[AF] Done. Best: {user_data.af_best_pos}")
+                    print(f"[AF] Done. Best Position: {user_data.af_best_pos}")
                     user_data.focuser.set(Focuser.OPT_FOCUS, user_data.af_best_pos)
                     user_data.af_running = False
 
-            # While focusing, return here (don't draw boxes yet)
+            # While focusing, skip detection drawing
             return Gst.PadProbeReturn.OK
 
         # -----------------------------------------------------------------
-        # 3. DETECTION LOGIC
+        # C. DETECTION LOGIC
         # -----------------------------------------------------------------
-        # Read Hailo Metadata
+        # We read the metadata that the HAILO chip already put on the buffer
         roi = hailo.get_roi_from_buffer(buffer)
         detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
 
@@ -182,11 +178,11 @@ def app_callback(pad, info, user_data: UserApp):
             if det.get_label() == "person":
                 bbox = det.get_bbox()
 
-                # Convert normalized coords to pixels
+                # Convert 0.0-1.0 coords to pixels
                 xmin = int(bbox.xmin() * w)
                 ymin = int(bbox.ymin() * h)
 
-                # Draw "Person Detected" Text
+                # Draw "Person Detected"
                 msg = "Person Detected"
                 # Border
                 cv2.putText(frame, msg, (xmin, ymin - 20),
@@ -214,7 +210,7 @@ if __name__ == "__main__":
     os.environ["HAILO_PIPELINE_INPUT"] = "rpi"
 
     print(f"[MAIN] Starting GStreamer Pipeline...")
-    print(f"[MAIN] Mode: Detection Only (No Tracking)")
+    print(f"[MAIN] Mode: Detection Only + OSD")
 
     user_data = UserApp()
     app = GStreamerDetectionApp(app_callback, user_data)
