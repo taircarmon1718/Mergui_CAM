@@ -7,6 +7,8 @@ import gi
 import cv2
 import numpy as np
 
+from scripts.preview_picamera import auto_focus
+
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
 import hailo
@@ -27,6 +29,9 @@ from hailo_apps.hailo_app_python.apps.detection.detection_pipeline import (
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, project_root)
 from B016712MP.Focuser import Focuser
+from B016712MP.AutoFocus import AutoFocus
+from B016712MP.RpiCamera import Camera
+
 
 
 # =====================================================================
@@ -36,10 +41,12 @@ class UserApp(app_callback_class):
     def __init__(self):
         super().__init__()
 
+
         print("\n" + "=" * 40)
         print("[INIT] Initializing PTZ Camera...")
 
         try:
+            self.camera = Camera()
             self.focuser = Focuser(1)
             self.focuser.set(Focuser.OPT_MODE, 1)
             time.sleep(0.2)
@@ -92,20 +99,16 @@ def app_callback(pad, info, user_data: UserApp):
         print("\n>>> [TIMER] 3 Seconds passed! Moving Camera to Right...")
 
         # Perform the move (Pan to 300)
-        user_data.focuser.set(Focuser.OPT_MOTOR_X, 90)
-
-        print(">>> [TIMER] Move to 90 Complete.")
-        print(">>> [TIMER] Camera will move BACK to Center in 2 seconds...")
-        time.sleep(2.0)
-        user_data.focuser.set(Focuser.OPT_MOTOR_X, 180)
-        print(">>> [TIMER] Moving Camera back to 180...")
-        time.sleep(2.0)
-        print(">>> [TIMER] Move to Center Complete.")
         user_data.focuser.set(Focuser.OPT_MOTOR_X, 0)
-        print(">>> [TIMER] Camera will move BACK to Center in 2 seconds...")
-        # Mark as done so we don't do it again
-        user_data.has_moved_once = True
-        print(">>> [TIMER] Move Complete.\n")
+        auto_focus = AutoFocus(user_data.focuser, user_data.camera)
+        auto_focus.debug = False
+        max_index, max_value = auto_focus.startFocus2()
+        print(f">>> [TIMER] AutoFocus completed: index={max_index}, value={max_value}")
+        time.sleep(0.5)
+
+
+
+
 
     # -----------------------------------------------------------
     # AUTO-FOCUS LOGIC
