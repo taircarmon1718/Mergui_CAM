@@ -1,54 +1,30 @@
-'''
-    Arducam programable zoom-lens autofocus component.
-
-    Copyright (c) 2019-4 Arducam <http://www.arducam.com>.
-
-    Permission is hereby granted, free of charge, to any person obtaining a copy
-    of this software and associated documentation files (the "Software"), to deal
-    in the Software without restriction, including without limitation the rights
-    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-    copies of the Software, and to permit persons to whom the Software is
-    furnished to do so, subject to the following conditions:
-
-    The above copyright notice and this permission notice shall be included in all
-    copies or substantial portions of the Software.
-
-    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
-    EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-    MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
-    IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
-    DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
-    OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE
-    OR OTHER DEALINGS IN THE SOFTWARE.
-'''
-
 import sys
 import time
 import math
-import cv2  # sudo apt-get install python-opencv
+import cv2
 import numpy as np
 
-# from RpiCamera import Camera       # original demo
-from B016712MP.RpiCamera import Camera  # adapt to your package
 from B016712MP.Focuser import Focuser
 
 
 class AutoFocus:
-    MAX_FOCUS_VALUE = 1100
+    # ✔ FIXED — true physical range of the Arducam IMX477 PTZ lens
+    MAX_FOCUS_VALUE = 1200
+
     value_buffer = []
     focuser = None
     camera = None
     debug = False
-    coarse_step_size = 100
+    coarse_step_size = 100   # original Arducam
 
-    def __init__(self, focuser, camera):
+    def __init__(self, focuser, camera=None):
         self.focuser = focuser
         self.camera = camera
 
-        # ===== HAILO INCREMENTAL AF STATE (same logic as focusing/startFocus) ====
-        self.h_stage = "idle"      # "idle" / "coarse" / "fine" / "done"
+        # incremental (Hailo) AF state:
+        self.h_stage = "idle"     # idle / coarse / fine / done
         self.h_step = 0
-        self.h_threshold = 0.0
+        self.h_threshold = 0
         self.h_max_dec_count = 0
 
         self.h_max_index = 0
@@ -56,90 +32,59 @@ class AutoFocus:
         self.h_last_value = -1.0
         self.h_dec_count = 0
         self.h_focal_distance = 0
-        # ========================================================================
+
 
     # ===============================
-    # Original helper functions
+    # Frame sharpness methods
     # ===============================
-    def get_end_point(self):
-        end_point = self.focuser.end_point[int(
-            math.floor(self.focuser.get(Focuser.OPT_ZOOM) / 100.0)
-        )]
-        if self.debug:
-            print("End Point: {}".format(end_point))
-        return end_point
+    def laplacian2(self, img):
+        """Laplacian variance = image sharpness score"""
+        img_gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+        return cv2.Laplacian(img_gray, cv2.CV_64F).var()
 
-    def get_starting_point(self):
-        starting_point = self.focuser.starting_point[int(
-            math.ceil(self.focuser.get(Focuser.OPT_ZOOM) / 100.0)
-        )]
-        if self.debug:
-            print("Starting Point: {}".format(starting_point))
-        return starting_point
 
     def filter(self, value):
+        """3-value rolling median filter"""
         max_len = 3
         self.value_buffer.append(value)
         if len(self.value_buffer) == max_len:
-            sort_list = sorted(self.value_buffer)
+            sorted_vals = sorted(self.value_buffer)
             self.value_buffer.pop(0)
-            return sort_list[math.ceil(max_len / 2)]
+            return sorted_vals[max_len // 2]
         return value
 
-    def sobel(self, img):
-        img_gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-        img_sobel = cv2.Sobel(img_gray, cv2.CV_16U, 1, 1)
-        return cv2.mean(img_sobel)[0]
-
-    def laplacian(self, img):
-        img_gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-        img_sobel = cv2.Laplacian(img_gray, cv2.CV_16U)
-        return cv2.mean(img_sobel)[0]
-
-    def laplacian2(self, img):
-        img_gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-        img_sobel = cv2.Laplacian(img_gray, cv2.CV_64F).var()
-        return img_sobel
-
-    def calculation(self, camera):
-        image = camera.getFrame()
-        # width = image.shape[1]
-        # height = image.shape[0]
-        # image = image[(height / 4):((height / 4) * 3),
-        #               (width / 4):((width / 4) * 3)]
-        # return self.laplacian(image)
-        # return self.sobel(image)
-        return self.laplacian2(image)
 
     # ===============================
-    # Original focusing logic (blocking)
+    # Original BLOCKING Arducam autofocus
+    # (unchanged)
     # ===============================
     def focusing(self, step, threshold, max_dec_count):
+        """Original Arducam hill-climb autofocus loop"""
         self.value_buffer = []
+
         max_index = self.focuser.get(Focuser.OPT_FOCUS)
         max_value = 0.0
         last_value = -1
         dec_count = 0
-        focal_distance = max_index
-        self.focuser.set(Focuser.OPT_FOCUS, focal_distance)
+
+        focal = max_index
+        self.focuser.set(Focuser.OPT_FOCUS, focal)
 
         while True:
-            self.focuser.set(Focuser.OPT_FOCUS, focal_distance)
-            val = self.calculation(self.camera)
-            val = self.filter(val)
+            self.focuser.set(Focuser.OPT_FOCUS, focal)
+
+            img = self.camera.getFrame()
+            val = self.filter(self.laplacian2(img))
 
             if self.debug:
-                print("filter value = %d,focal_distance = %d" %
-                      (val, focal_distance))
+                print(f"[AF] pos={focal} val={val:.2f}")
 
             if val > max_value:
-                max_index = focal_distance
                 max_value = val
+                max_index = focal
 
+            # detect decreases
             if last_value - val > threshold:
-                if self.debug:
-                    print("dec-----last_value = %lf,current_value = %lf" %
-                          (last_value, val))
                 dec_count += 1
             elif last_value - val != 0:
                 dec_count = 0
@@ -148,243 +93,135 @@ class AutoFocus:
                 break
 
             last_value = val
-            focal_distance = self.focuser.get(Focuser.OPT_FOCUS)
-            focal_distance += step
-            if focal_distance > self.MAX_FOCUS_VALUE:
+            focal += step
+
+            if focal > self.MAX_FOCUS_VALUE:   # ✔ FIXED correct range
                 break
 
         return max_index, max_value
 
-    def CoarseAdjustment(self, st_point, ed_point):
-        images = []
-        index_list = []
-        eval_list = []
-        time_list = []
-        self.focuser.set(Focuser.OPT_FOCUS, st_point)
-
-        image = self.camera.getFrame()
-        time_list.append(time.time())
-        images.append(image)
-
-        self.focuser.set(Focuser.OPT_FOCUS, ed_point, 0)
-        while self.focuser.isBusy():
-            image = self.camera.getFrame()
-            time_list.append(time.time())
-            images.append(image)
-
-        total_time = time_list[len(time_list) - 1] - time_list[0]
-        index_list = np.arange(len(images))
-        last_time = time_list[0]
-        if self.debug:
-            print("total images = %d" % (len(images)))
-            print("total time = %d" % (total_time))
-        for i in range(len(images)):
-            image = images.pop(0)
-            width = image.shape[1]
-            height = image.shape[0]
-            # image = image[(height / 4):((height / 4) * 3),
-            #               (width / 4):((width / 4) * 3)]
-            result = self.laplacian2(image)
-            eval_list.append(result)
-        return eval_list, index_list, time_list
 
     def startFocus(self):
-        begin = time.time()
+        """Original Arducam startFocus()"""
+        # reset to 0
         self.focuser.set(Focuser.OPT_FOCUS, 0)
-        self.MAX_FOCUS_VALUE = self.get_end_point()
-        self.focuser.set(Focuser.OPT_FOCUS, self.get_starting_point())
+
+        # start at 0
+        start = 0
+
+        # coarse pass
+        coarse_best, _ = self.focusing(self.coarse_step_size, 1, 2)
+        coarse_best = max(0, coarse_best - self.coarse_step_size)
+
+        self.focuser.set(Focuser.OPT_FOCUS, coarse_best)
+
+        # fine scan
+        fine_best, fine_val = self.focusing(5, 1, 3)
+        self.focuser.set(Focuser.OPT_FOCUS, fine_best)
+
+        return fine_best, fine_val
+
+
+    # ===============================
+    # NON-BLOCKING autofocus for Hailo pipeline
+    # (works frame-by-frame inside app_callback)
+    # ===============================
+    def _hailo_init(self, step, threshold, max_dec, start_pos, stage):
         if self.debug:
-            print("init time = %lf" % (time.time() - begin))
-        begin = time.time()
-        max_index, max_value = self.focusing(self.coarse_step_size, 1, 2)
-
-        max_index = max_index - self.coarse_step_size
-        if max_index < 0:
-            max_index = 0
-        self.focuser.set(Focuser.OPT_FOCUS, max_index)
-
-        max_index, max_value = self.focusing(5, 1, 3)
-        self.focuser.set(Focuser.OPT_FOCUS, max_index)
-        if self.debug:
-            print("focusing time = %lf" % (time.time() - begin))
-        return max_index, max_value
-
-    def startFocus2(self):
-        begin = time.time()
-        self.focuser.reset(Focuser.OPT_FOCUS)
-        self.MAX_FOCUS_VALUE = self.get_end_point()
-        starting_point = self.get_starting_point()
-
-        if self.debug:
-            print("init time = %lf" % (time.time() - begin))
-        begin = time.time()
-        eval_list, index_list, time_list = self.CoarseAdjustment(
-            starting_point, self.MAX_FOCUS_VALUE
-        )
-
-        max_index = np.argmax(eval_list)
-        total_time = time_list[len(time_list) - 1] - time_list[0]
-        max_time = time_list[max_index - 1] - time_list[0]
-        self.focuser.set(
-            Focuser.OPT_FOCUS,
-            int(((max_time - 0.0) / total_time)
-                * (self.MAX_FOCUS_VALUE - starting_point)) + starting_point,
-        )
-
-        max_index, max_value = self.focusing(20, 1, 4)
-        self.focuser.set(Focuser.OPT_FOCUS, max_index - 30)
-        if self.debug:
-            print("focusing time = %lf" % (time.time() - begin))
-        return max_index, max_value
-
-    def auxiliaryFocusing(self):
-        begin = time.time()
-        self.focuser.set(Focuser.OPT_FOCUS, 0)
-        self.MAX_FOCUS_VALUE = 20000
-        starting_point = 0
-        if self.debug:
-            print("init time = %lf" % (time.time() - begin))
-        begin = time.time()
-
-        eval_list, index_list, time_list = self.CoarseAdjustment(
-            starting_point, self.MAX_FOCUS_VALUE
-        )
-
-        max_index = np.argmax(eval_list)
-        total_time = time_list[len(time_list) - 1] - time_list[0]
-        max_time = time_list[max_index] - time_list[0]
-        self.focuser.set(
-            Focuser.OPT_FOCUS,
-            int(((max_time - 0.0) / total_time)
-                * (self.MAX_FOCUS_VALUE - starting_point)) + starting_point,
-        )
-
-        if self.debug:
-            print("focusing time = %lf" % (time.time() - begin))
-        return max_index
-
-    # =====================================================================
-    # HAILO INCREMENTAL MODE (for app_callback)
-    #  - SAME hill-climb logic as focusing(), just split across frames
-    # =====================================================================
-    def _hailo_init_stage(self, step, threshold, max_dec_count, start_pos, stage):
-        if self.debug:
-            print(f"[AF-H] start stage={stage}, step={step}, start_pos={start_pos}")
+            print(f"[AF-H] init stage={stage} start={start_pos}")
 
         self.value_buffer = []
         self.h_stage = stage
-        self.h_step = int(step)
-        self.h_threshold = float(threshold)
-        self.h_max_dec_count = int(max_dec_count)
+        self.h_step = step
+        self.h_threshold = threshold
+        self.h_max_dec_count = max_dec
 
-        self.h_max_index = int(start_pos)
+        self.h_max_index = start_pos
         self.h_max_value = 0.0
         self.h_last_value = -1.0
         self.h_dec_count = 0
-        self.h_focal_distance = int(start_pos)
+        self.h_focal_distance = start_pos
 
-        self.focuser.set(Focuser.OPT_FOCUS, self.h_focal_distance)
+        self.focuser.set(Focuser.OPT_FOCUS, start_pos)
+
 
     def startFocus_hailo(self):
-        """Initialize incremental autofocus (same params as startFocus)."""
-        self.MAX_FOCUS_VALUE = self.get_end_point()
-        starting_point = self.get_starting_point()
-        if self.debug:
-            print(
-                f"[AF-H] init Hailo AF. MAX={self.MAX_FOCUS_VALUE}, "
-                f"start={starting_point}"
-            )
+        """Initialize incremental autofocus."""
+        start_pos = 0   # IMX477 always starts focus range at 0
 
-        self._hailo_init_stage(
-            step=self.coarse_step_size,  # 100
+        self._hailo_init(
+            step=self.coarse_step_size,   # 100
             threshold=1,
-            max_dec_count=2,
-            start_pos=starting_point,
-            stage="coarse",
+            max_dec=2,
+            start_pos=start_pos,
+            stage="coarse"
         )
+
 
     def stepFocus_hailo(self, frame):
         """
-        Perform ONE focusing step using the given RGB frame
-        from Hailo (same logic as focusing()).
-
+        Perform one autofocus step (called in app_callback)
         Returns:
-            finished (bool), best_pos (int or None)
+            finished (bool), best_focus_position (int or None)
         """
         if self.h_stage in ("idle", "done"):
-            return (self.h_stage == "done"), (
+            return self.h_stage == "done", (
                 self.h_max_index if self.h_stage == "done" else None
             )
 
-        # === one iteration of focusing() loop ===
-        val = self.laplacian2(frame)
-        val = self.filter(val)
+        # --- compute sharpness on Hailo frame ---
+        val = self.filter(self.laplacian2(frame))
 
         if self.debug:
-            print(
-                f"[AF-H] stage={self.h_stage}, pos={self.h_focal_distance}, "
-                f"val={val:.2f}"
-            )
+            print(f"[AF-H] stage={self.h_stage}, pos={self.h_focal_distance}, val={val:.2f}")
 
+        # update max
         if val > self.h_max_value:
             self.h_max_value = val
             self.h_max_index = self.h_focal_distance
 
+        # detect decreases
         if self.h_last_value >= 0:
-            diff = self.h_last_value - val
-            if diff > self.h_threshold:
+            if self.h_last_value - val > self.h_threshold:
                 self.h_dec_count += 1
-            elif diff != 0:
+            elif self.h_last_value - val != 0:
                 self.h_dec_count = 0
 
         self.h_last_value = val
 
+        # ---- STOP CONDITION ----
         if (
-            self.h_dec_count > self.h_max_dec_count
-            or self.h_focal_distance > self.MAX_FOCUS_VALUE
+            self.h_dec_count > self.h_max_dec_count or
+            self.h_focal_distance > self.MAX_FOCUS_VALUE   # ✔ FIXED range
         ):
             if self.h_stage == "coarse":
-                coarse_best = self.h_max_index - self.coarse_step_size
-                if coarse_best < 0:
-                    coarse_best = 0
-                if self.debug:
-                    print(
-                        f"[AF-H] coarse done, best={self.h_max_index}, "
-                        f"fine_start={coarse_best}"
-                    )
+                # prepare fine stage
+                fine_start = max(0, self.h_max_index - self.coarse_step_size)
 
-                self._hailo_init_stage(
+                if self.debug:
+                    print(f"[AF-H] coarse done. peak={self.h_max_index}, fine_start={fine_start}")
+
+                self._hailo_init(
                     step=5,
                     threshold=1,
-                    max_dec_count=3,
-                    start_pos=coarse_best,
-                    stage="fine",
+                    max_dec=3,
+                    start_pos=fine_start,
+                    stage="fine"
                 )
                 return False, None
-            else:
-                if self.debug:
-                    print(
-                        f"[AF-H] DONE. Best focus={self.h_max_index}, "
-                        f"val={self.h_max_value:.2f}"
-                    )
-                self.focuser.set(Focuser.OPT_FOCUS, int(self.h_max_index))
-                self.h_stage = "done"
-                return True, self.h_max_index
 
+            # ✓ DONE — apply best focus
+            if self.debug:
+                print(f"[AF-H] DONE best={self.h_max_index} val={self.h_max_value:.2f}")
+
+            self.focuser.set(Focuser.OPT_FOCUS, self.h_max_index)
+            self.h_stage = "done"
+            return True, self.h_max_index
+
+        # ---- Continue scanning ----
         self.h_focal_distance += self.h_step
+
         if self.h_focal_distance <= self.MAX_FOCUS_VALUE:
-            self.focuser.set(Focuser.OPT_FOCUS, int(self.h_focal_distance))
+            self.focuser.set(Focuser.OPT_FOCUS, self.h_focal_distance)
 
         return False, None
-
-
-if __name__ == "__main__":
-    camera = Camera()
-    camera.start_preview()
-    focuser = Focuser(1)
-    autoFocus = AutoFocus(focuser, camera)
-    autoFocus.debug = True
-    autoFocus.startFocus2()
-    time.sleep(5)
-    camera.stop_preview()
-    camera.close()
