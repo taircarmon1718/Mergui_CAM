@@ -1,150 +1,196 @@
+import math
 import cv2
 import numpy as np
 from B016712MP.Focuser import Focuser
 
 
 class AutoFocus:
-    MAX_FOCUS_VALUE = 1200
+    """
+    Non-blocking autofocus for Hailo pipeline.
 
-    # כמה פריימים לחכות בין הזזה למדידה?
-    # (3 זה בדרך כלל המספר בטוח ל-30fps כדי לוודא שהתמונה עדכנית)
-    FRAMES_TO_WAIT = 3
+    Usage in your code:
+        af = AutoFocus(focuser, camera=None, debug=True)
+        af.startFocus_hailo()
+        ...
+        finished, best_pos = af.stepFocus_hailo(frame_from_hailo)
+    """
+
+    # Not used as a hard limit anymore; real limits come from focuser tables.
+    MAX_FOCUS_VALUE = 20000
 
     def __init__(self, focuser, camera=None, debug=False):
         self.focuser = focuser
-        self.camera = camera
+        self.camera = camera   # not used in Hailo mode, kept for compatibility
         self.debug = debug
 
-        self.stage = "idle"
+        # Hailo incremental AF state
+        self.stage = "idle"          # "idle" / "coarse" / "fine" / "done"
         self.step = 0
-        self.stage_end = 0
+        self.focal = 0               # current focus motor position
+        self.stage_end = 0           # last position to scan in this stage
 
-        self.max_index = 0
-        self.max_value = -1.0
-        self.focal = 0
+        self.max_index = 0           # best focus found in this stage
+        self.max_value = -1.0        # best sharpness value
 
-        # מונה להמתנה בין תזוזות
-        self.wait_counter = 0
+        # small rolling window to stabilize measurements
+        self.buffer = []
 
-    # ============================================================
-    #  Tenengrad - Optimized for Center ROI
-    # ============================================================
-    def get_sharpness(self, frame):
+    # ------------------------------------------------------------------
+    # Helpers taken from original Arducam AutoFocus
+    # ------------------------------------------------------------------
+    def get_end_point(self):
+        """Get focus end-point according to current zoom (same as original)."""
+        return self.focuser.end_point[
+            int(math.floor(self.focuser.get(Focuser.OPT_ZOOM) / 100.0))
+        ]
+
+    def get_starting_point(self):
+        """Get focus starting-point according to zoom (same as original)."""
+        return self.focuser.starting_point[
+            int(math.ceil(self.focuser.get(Focuser.OPT_ZOOM) / 100.0))
+        ]
+
+    # ------------------------------------------------------------------
+    # Sharpness measure – identical to original `laplacian2`
+    # ------------------------------------------------------------------
+    def _laplacian2(self, img):
+        """Laplacian variance — same metric as in original code."""
+        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+        return cv2.Laplacian(gray, cv2.CV_64F).var()
+
+    def _sharpness(self, frame):
         """
-        חותך את המרכז (33% מהתמונה) ומחשב חדות רק עליו.
-        זה הרבה יותר מהיר ומדויק לאובייקטים.
+        Compute sharpness on the **center crop** of the frame.
+        This avoids being dominated by noisy borders.
         """
         h, w = frame.shape[:2]
+        y0, y1 = h // 4, 3 * h // 4
+        x0, x1 = w // 4, 3 * w // 4
+        crop = frame[y0:y1, x0:x1]
 
-        # חיתוך המרכז (ROI) - שליש מהתמונה
-        cx, cy = w // 2, h // 2
-        half_w, half_h = w // 6, h // 6
+        val = self._laplacian2(crop)
 
-        roi = frame[cy - half_h: cy + half_h, cx - half_w: cx + half_w]
+        # rolling median over last 3 values
+        self.buffer.append(val)
+        if len(self.buffer) > 3:
+            self.buffer.pop(0)
+        return sorted(self.buffer)[len(self.buffer) // 2]
 
-        # המרת צבע וחישוב מהיר
-        gray = cv2.cvtColor(roi, cv2.COLOR_RGB2GRAY)
-
-        # Tenengrad מהיר
-        gx = cv2.Sobel(gray, cv2.CV_16S, 1, 0, ksize=3)  # 16S מהיר מ-32F
-        gy = cv2.Sobel(gray, cv2.CV_16S, 0, 1, ksize=3)
-
-        # חישוב Magnitude בערך מוחלט (מהיר יותר מ-pow)
-        abs_gx = cv2.convertScaleAbs(gx)
-        abs_gy = cv2.convertScaleAbs(gy)
-
-        score = cv2.addWeighted(abs_gx, 0.5, abs_gy, 0.5, 0)
-        return float(np.mean(score))
-
-    # ============================================================
-    # Initialize Stage
-    # ============================================================
+    # ------------------------------------------------------------------
+    # Internal: init scan stage
+    # ------------------------------------------------------------------
     def _init_stage(self, step, start_pos, end_pos, stage):
+        """
+        Configure scan stage (coarse or fine).
+        We will linearly sweep from start_pos to end_pos in this stage.
+        """
+        start_pos = int(start_pos)
+        end_pos = int(end_pos)
+
         if self.debug:
-            print(f"[AF] Init {stage}: Start={start_pos}, End={end_pos}, Step={step}")
+            print(f"[AF] init {stage}, start={start_pos}, end={end_pos}")
 
         self.stage = stage
-        self.step = step
-
-        start_pos = max(0, int(start_pos))
-        end_pos = min(int(end_pos), self.MAX_FOCUS_VALUE)
-
+        self.step = int(step)
         self.focal = start_pos
         self.stage_end = end_pos
 
         self.max_index = start_pos
         self.max_value = -1.0
+        self.buffer = []
 
-        # איפוס מונה המתנה
-        self.wait_counter = self.FRAMES_TO_WAIT
-
-        # תזוזה ראשונה
+        # Move lens to starting position
         self.focuser.set(Focuser.OPT_FOCUS, start_pos)
 
-    # ============================================================
-    # Start Logic
-    # ============================================================
+    # ------------------------------------------------------------------
+    # Public: start autofocus (call once before using stepFocus_hailo)
+    # ------------------------------------------------------------------
     def startFocus_hailo(self):
-        # סריקה גסה: קפיצות של 50 (יותר מדויק מ-80)
-        self._init_stage(step=50, start_pos=0, end_pos=self.MAX_FOCUS_VALUE, stage="coarse")
+        """
+        Start a two-stage autofocus:
+        1) coarse scan: from starting_point to end_point with large steps
+        2) fine scan: around the coarse maximum with small steps
+        """
+        end_point = self.get_end_point()
+        start_point = self.get_starting_point()
 
-    # ============================================================
-    # Main Loop (Call per frame)
-    # ============================================================
+        # coarse scan over [start_point, end_point]
+        self._init_stage(
+            step=100,               # coarse step size (like original)
+            start_pos=start_point,
+            end_pos=end_point,
+            stage="coarse"
+        )
+
+    # ------------------------------------------------------------------
+    # Public: one autofocus step (call every frame from app_callback)
+    # ------------------------------------------------------------------
     def stepFocus_hailo(self, frame):
+        """
+        Run a single autofocus step on the given frame.
+
+        Returns:
+            finished (bool): True when autofocus is complete.
+            best_position (int or None): best focus position if finished.
+        """
         if self.stage in ("idle", "done"):
-            return self.stage == "done", (self.max_index if self.stage == "done" else None)
+            return self.stage == "done", (
+                self.max_index if self.stage == "done" else None
+            )
 
-        # --- מנגנון המתנה (De-bouncing) ---
-        # אם הזזנו את המנוע, אנחנו חייבים לחכות כמה פריימים
-        # כדי שהתמונה שמגיעה תתאים למיקום החדש של העדשה
-        if self.wait_counter > 0:
-            self.wait_counter -= 1
-            return False, None
-
-        # --- מדידה ---
-        val = self.get_sharpness(frame)
+        # 1) Measure sharpness at current focus position
+        val = self._sharpness(frame)
 
         if self.debug:
-            print(f"[AF] {self.stage} | Pos: {self.focal} | Val: {val:.2f}")
+            print(f"[AF] {self.stage} pos={self.focal} val={val:.2f}")
 
-        # שמירת המקסימום
+        # Update best focus if this is the sharpest so far
         if val > self.max_value:
             self.max_value = val
             self.max_index = self.focal
 
-        # --- החלטה האם להמשיך ---
+        # 2) Check if we finished scanning the range for this stage
         if self.focal >= self.stage_end:
-            # סיימנו את השלב הנוכחי
-
+            # ---------------- COARSE STAGE → FINE STAGE ----------------
             if self.stage == "coarse":
-                # מעבר לסריקה עדינה סביב השיא שנמצא
-                # טווח של +/- 100 סביב המקסימום הגס
-                fine_start = max(0, self.max_index - 100)
-                fine_end = min(self.max_index + 100, self.MAX_FOCUS_VALUE)
+                # fine window: ±100 around coarse maximum
+                start_point = self.get_starting_point()
+                end_point = self.get_end_point()
 
-                print(f">>> [AF] Coarse Peak at {self.max_index}. Starting FINE scan...")
+                fine_start = max(start_point, self.max_index - 100)
+                fine_end = min(end_point, self.max_index + 100)
 
-                self._init_stage(step=10, start_pos=fine_start, end_pos=fine_end, stage="fine")
+                if self.debug:
+                    print(
+                        f"[AF] coarse done: peak={self.max_index}, "
+                        f"fine_start={fine_start}, fine_end={fine_end}"
+                    )
+
+                self._init_stage(
+                    step=10,          # fine step size (like original 5–20)
+                    start_pos=fine_start,
+                    end_pos=fine_end,
+                    stage="fine"
+                )
                 return False, None
 
-            else:  # stage == "fine" -> סיימנו לגמרי
-                print(f">>> [AF] DONE! Best Position: {self.max_index} (Score: {self.max_value:.2f})")
-                self.focuser.set(Focuser.OPT_FOCUS, self.max_index)
-                self.stage = "done"
-                return True, self.max_index
+            # ---------------------- FINE STAGE DONE ---------------------
+            if self.debug:
+                print(
+                    f"[AF] FINISHED → best={self.max_index}, "
+                    f"val={self.max_value:.2f}"
+                )
 
-        # --- התקדמות לצעד הבא ---
+            # Move lens to the best focus position found
+            self.focuser.set(Focuser.OPT_FOCUS, self.max_index)
+            self.stage = "done"
+            return True, self.max_index
+
+        # 3) Continue scanning in this stage
         self.focal += self.step
-
-        # הגנה מחריגה
         if self.focal > self.stage_end:
-            self.focal = self.stage_end  # בדיקה אחרונה בדיוק בקצה
+            self.focal = self.stage_end
 
-        # ביצוע ההזזה הפיזית
         self.focuser.set(Focuser.OPT_FOCUS, self.focal)
-
-        # איפוס המונה - חכה X פריימים עד המדידה הבאה
-        self.wait_counter = self.FRAMES_TO_WAIT
 
         return False, None
