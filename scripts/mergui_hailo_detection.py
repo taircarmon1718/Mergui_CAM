@@ -102,6 +102,21 @@ def app_callback(pad, info, user_data: UserApp):
     roi = hailo.get_roi_from_buffer(buffer)
     user_data.frame_counter += 1
 
+    user_data.frame_counter += 1
+
+    fmt, w, h = get_caps_from_pad(pad)
+    frame = get_numpy_from_buffer(buffer, fmt, w, h)
+    if frame is None:
+        return Gst.PadProbeReturn.OK
+
+    # run AF every 3rd frame
+    if user_data.frame_counter % 3 == 0:
+        finished, best_pos = user_data.autofocus.stepFocus_hailo(frame)
+        if finished:
+            print(f"[AF-H] autofocus finished at pos={best_pos}")
+            # later, after you pan/tilt, you can restart:
+            # user_data.autofocus.startFocus_hailo()
+
     # -----------------------------------------------------------
     # AUTOMATIC MOVEMENT LOGIC (Time-Based)
     # -----------------------------------------------------------
