@@ -33,21 +33,24 @@ class AutoFocus:
     # ============================================================
     def get_sharpness(self, frame):
         h, w = frame.shape[:2]
-        # חיתוך אגרסיבי יותר - רק רבע אמצעי
+        # חיתוך ROI - שליש מרכזי
         cx, cy = w // 2, h // 2
-        half_w, half_h = w // 8, h // 8
-
+        half_w, half_h = w // 6, h // 6
         roi = frame[cy - half_h: cy + half_h, cx - half_w: cx + half_w]
 
+        # המרה לאפור
         gray = cv2.cvtColor(roi, cv2.COLOR_RGB2GRAY)
-        gx = cv2.Sobel(gray, cv2.CV_16S, 1, 0, ksize=3)
-        gy = cv2.Sobel(gray, cv2.CV_16S, 0, 1, ksize=3)
 
-        abs_gx = cv2.convertScaleAbs(gx)
-        abs_gy = cv2.convertScaleAbs(gy)
+        # --- שלב קריטי: ניקוי רעשים ---
+        # טשטוש קל מעלים "רעש" דיגיטלי שעלול להיראות כמו פוקוס
+        gray = cv2.GaussianBlur(gray, (3, 3), 0)
 
-        score = cv2.addWeighted(abs_gx, 0.5, abs_gy, 0.5, 0)
-        return float(np.mean(score))
+        # חישוב לפלסיאן
+        laplacian = cv2.Laplacian(gray, cv2.CV_64F)
+
+        # החזרת השונות (Variance) - ככל שהפיזור גדול יותר, התמונה חדה יותר
+        score = laplacian.var()
+        return float(score)
 
     # ============================================================
     # Init Stage
