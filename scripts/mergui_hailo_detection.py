@@ -166,7 +166,7 @@ def app_callback(pad, info, user_data: UserApp):
             # ----------------------------------------------------------------
             def _restore_focus():
                 print("check")
-                user_data.focuser.set(Focuser.OPT_FOCUS, 0)
+                user_data.focuser.set(Focuser.OPT_FOCUS, 140)
                 return False  # run only once
 
             # Schedule the restore callback 10 seconds from now
