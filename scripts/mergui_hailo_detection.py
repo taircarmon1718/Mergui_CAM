@@ -119,6 +119,9 @@ def app_callback(pad, info, user_data: UserApp):
         finished, best_pos = user_data.autofocus.stepFocus_hailo(frame)
         if finished:
             print(f"[AF-H] autofocus finished at pos={best_pos}")
+            print("i am here")
+            user_data.focuser.set(Focuser.OPT_FOCUS, best_pos)
+
             # later, after you pan/tilt, you can restart:
             # user_data.autofocus.startFocus_hailo()
 
