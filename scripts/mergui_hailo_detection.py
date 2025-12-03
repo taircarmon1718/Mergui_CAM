@@ -141,37 +141,10 @@ def app_callback(pad, info, user_data: UserApp):
             print(f"[AF] DONE at pos={user_data.af_current_pos}, score={score:.1f}")
             user_data.af_done = True
 
-    print("hi")
-    # -----------------------------------------------------------
-    # AUTO-FOCUS LOGIC
-    # -----------------------------------------------------------
-    if user_data.af_running and not user_data.af_finished:
-        print("in here!")
-        if user_data.frame_counter % 3 == 0:
-            fmt, w, h = get_caps_from_pad(pad)
+        print("done here!!!!!!!!!!!!!")
 
-            # Read-Only access (Safe)
-            frame = get_numpy_from_buffer(buffer, fmt, w, h)
 
-            if frame is not None:
-                gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
-                score = cv2.Laplacian(gray, cv2.CV_64F).var()
 
-                if score > user_data.af_best_val:
-                    user_data.af_best_val = score
-                    user_data.af_best_pos = user_data.af_pos
-
-                user_data.af_pos += user_data.af_step
-
-                if user_data.af_pos <= user_data.af_max:
-                    user_data.focuser.set(Focuser.OPT_FOCUS, user_data.af_pos)
-                else:
-                    print(f"[AF] DONE. Best Focus: {user_data.af_best_pos}")
-                    user_data.focuser.set(Focuser.OPT_FOCUS, user_data.af_best_pos)
-                    user_data.af_finished = True
-                    user_data.af_running = False
-            time.sleep(10)
-            print("done")
     # ----------------------------------------
     # this run all the time
     # ----------------------------------------
