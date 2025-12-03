@@ -170,46 +170,11 @@ def app_callback(pad, info, user_data: UserApp):
                     user_data.focuser.set(Focuser.OPT_FOCUS, user_data.af_best_pos)
                     user_data.af_finished = True
                     user_data.af_running = False
+            time.sleep(10)
+            print("done")
     # ----------------------------------------
-    # SIMPLE & FAST HILL-CLIMB AUTOFOCUS
+    # this run all the time
     # ----------------------------------------
-    if user_data.af_enabled and not user_data.af_done:
-        print("hiiiii its in here!")
-
-        fmt, w, h = get_caps_from_pad(pad)
-        frame = get_numpy_from_buffer(buffer, fmt, w, h)
-        if frame is None:
-            return Gst.PadProbeReturn.OK
-
-        # compute sharpness
-        gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
-        score = cv2.Laplacian(gray, cv2.CV_64F).var()
-
-        # first sample
-        if user_data.af_last_score < 0:
-            user_data.af_last_score = score
-            print(f"[AF] Initial score = {score:.1f}")
-            return Gst.PadProbeReturn.OK
-
-        # if image is improving → keep direction
-        if score > user_data.af_last_score:
-            user_data.af_current_pos += user_data.af_direction
-            user_data.focuser.set(Focuser.OPT_FOCUS, int(user_data.af_current_pos))
-            print(f"[AF] ↑ better → pos={user_data.af_current_pos}, score={score:.1f}")
-
-        # if image got worse → reverse direction
-        else:
-            user_data.af_direction *= -1  # flip direction
-            user_data.af_current_pos += user_data.af_direction
-            user_data.focuser.set(Focuser.OPT_FOCUS, int(user_data.af_current_pos))
-            print(f"[AF] ↓ worse → flipping dir, new pos={user_data.af_current_pos}")
-
-        user_data.af_last_score = score
-
-        # stop if oscillating near peak
-        if abs(user_data.af_direction) <= 1:
-            print(f"[AF] DONE at pos={user_data.af_current_pos}, score={score:.1f}")
-            user_data.af_done = True
 
     return Gst.PadProbeReturn.OK
 
