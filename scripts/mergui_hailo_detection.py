@@ -115,15 +115,8 @@ def app_callback(pad, info, user_data: UserApp):
         return Gst.PadProbeReturn.OK
 
     # run AF every 3rd frame
-    if user_data.frame_counter % 3 == 0:
-        finished, best_pos = user_data.autofocus.stepFocus_hailo(frame)
-        if finished:
-            print(f"[AF-H] autofocus finished at pos={best_pos}")
-            print("i am here")
-            user_data.focuser.set(Focuser.OPT_FOCUS, 500)
 
-            # later, after you pan/tilt, you can restart:
-            # user_data.autofocus.startFocus_hailo()
+   # if user_data.frame_counter % 3 == 0:
 
     # -----------------------------------------------------------
     # AUTOMATIC MOVEMENT LOGIC (Time-Based)
@@ -136,7 +129,20 @@ def app_callback(pad, info, user_data: UserApp):
         user_data.focuser.set(Focuser.OPT_MOTOR_X, 0)
         time.sleep(1.0)
         print("done")
+        finished, best_pos = user_data.autofocus.stepFocus_hailo(frame)
+        if finished:
+            print(f"[AF-H] autofocus finished at pos={best_pos}")
+            print("i am here")
+            user_data.focuser.set(Focuser.OPT_FOCUS, 500)
+            time.sleep(5)
+            print("i am here 2")
+            user_data.focuser.set(Focuser.OPT_FOCUS, 700)
+            time.sleep(5)
+            print("i am here3")
+            user_data.focuser.set(Focuser.OPT_FOCUS, 300)
 
+            # later, after you pan/tilt, you can restart:
+            # user_data.autofocus.startFocus_hailo()
 
     # ----------------------------------------
     # this run all the time
