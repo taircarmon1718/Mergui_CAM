@@ -165,10 +165,10 @@ def app_callback(pad, info, user_data: UserApp):
             # after 10 seconds, print "check" and set focus back to 200.
             # We do this using GLib timeout so we don't block the pipeline.
             # ----------------------------------------------------------------
-            def _restore_focus():
+            '''def _restore_focus():
                 print("check")
                 user_data.focuser.set(Focuser.OPT_FOCUS, 270)
-                return False  # run only once
+                return False  # run only once'''
 
             # Schedule the restore callback 10 seconds from now
             GLib.timeout_add_seconds(10, _restore_focus)
