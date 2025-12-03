@@ -145,6 +145,7 @@ class AutoFocus:
         self.focuser.set(Focuser.OPT_FOCUS, start_pos)
 
 
+
     def startFocus_hailo(self):
         """Initialize incremental autofocus."""
         start_pos = 0   # IMX477 always starts focus range at 0

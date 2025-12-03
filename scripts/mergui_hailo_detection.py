@@ -76,6 +76,7 @@ class UserApp(app_callback_class):
         self.af_current_pos = 200  #
         self.af_last_score = -1
         self.af_done = False
+        self.is_focusing = True
 
         self.focuser.set(Focuser.OPT_FOCUS, self.af_current_pos)
 
@@ -129,21 +130,24 @@ def app_callback(pad, info, user_data: UserApp):
         user_data.focuser.set(Focuser.OPT_MOTOR_X, 0)
         time.sleep(1.0)
         print("done")
+
+
+    if user_data.is_focusing:
+
         finished, best_pos = user_data.autofocus.stepFocus_hailo(frame)
+
         if finished:
-            print(f"[AF-H] autofocus finished at pos={best_pos}")
-            print("i am here")
+            print(f"!!! [AF-H] FINISHED! Best Focus Position: {best_pos} !!!")
+            user_data.is_focusing = False
+            print("check1")
+            user_data.focuser.set(Focuser.OPT_FOCUS, 300)
+            time.sleep(5)
+            print("check2")
+            user_data.focuser.set(Focuser.OPT_FOCUS, 800)
+            time.sleep(5)
+            print("check3")
             user_data.focuser.set(Focuser.OPT_FOCUS, 500)
             time.sleep(5)
-            print("i am here 2")
-            user_data.focuser.set(Focuser.OPT_FOCUS, 700)
-            time.sleep(5)
-            print("i am here3")
-            user_data.focuser.set(Focuser.OPT_FOCUS, 300)
-
-            # later, after you pan/tilt, you can restart:
-            # user_data.autofocus.startFocus_hailo()
-
     # ----------------------------------------
     # this run all the time
     # ----------------------------------------
