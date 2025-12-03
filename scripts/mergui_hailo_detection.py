@@ -125,6 +125,7 @@ def app_callback(pad, info, user_data: UserApp):
     # Read ROI metadata (currently not used, but kept for future logic)
     roi = hailo.get_roi_from_buffer(buffer)
 
+
     # Increase frame counter (used for the 3-second timer)
     user_data.frame_counter += 1
 
@@ -133,16 +134,6 @@ def app_callback(pad, info, user_data: UserApp):
     frame = get_numpy_from_buffer(buffer, fmt, w, h)
     if frame is None:
         return Gst.PadProbeReturn.OK
-
-    # -----------------------------------------------------------
-    # 3-SECOND TIMER: move camera once after ~90 frames
-    # -----------------------------------------------------------
-    # ~30 FPS → 90 frames ≈ 3 seconds
-    if user_data.frame_counter == 90 and not user_data.has_moved_once:
-        print("\n>>> [TIMER] 3 Seconds passed! Moving Camera to Right...")
-        user_data.focuser.set(Focuser.OPT_MOTOR_X, 0)
-        user_data.has_moved_once = True
-        print("done")
 
     # -----------------------------------------------------------
     # INCREMENTAL AUTOFOCUS (non-blocking)
@@ -160,18 +151,40 @@ def app_callback(pad, info, user_data: UserApp):
             user_data.focuser.set(Focuser.OPT_FOCUS, best_pos)
             print(f"focus on {best_pos}")
 
-            # ----------------------------------------------------------------
-            # If you still want your original "debug" behaviour:
-            # after 10 seconds, print "check" and set focus back to 200.
-            # We do this using GLib timeout so we don't block the pipeline.
-            # ----------------------------------------------------------------
+            #
             '''def _restore_focus():
                 print("check")
                 user_data.focuser.set(Focuser.OPT_FOCUS, 270)
                 return False  # run only once'''
-
+            '''
+            # -----------------------------------------------------------
+            # 3-SECOND TIMER: move camera once after ~90 frames
+            # -----------------------------------------------------------
+            # ~30 FPS → 90 frames ≈ 3 seconds
+            if user_data.frame_counter == 90 and not user_data.has_moved_once:
+                print("\n>>> [TIMER] 3 Seconds passed! Moving Camera to Right...")
+                user_data.focuser.set(Focuser.OPT_MOTOR_X, 0)
+                user_data.has_moved_once = True
+                print("done")
+                '''
             # Schedule the restore callback 10 seconds from now
           #  GLib.timeout_add_seconds(10, _restore_focus)
+    detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
+    for det in detections:
+        label = det.get_label()
+        confidence = det.get_confidence()
+
+
+        if label == "person" and confidence > 0.5:
+            bbox = det.get_bbox()
+            center_x = bbox.xmin() + (bbox.width() / 2)
+            center_y = bbox.ymin() + (bbox.height() / 2)
+
+            # הדפסה ברורה לטרמינל
+            print(f">>> DETECTED: {label.upper()} | Conf: {confidence:.2f} | Pos: X={center_x:.2f}, Y={center_y:.2f}")
+
+
+
 
     # Always return OK so GStreamer continues
     return Gst.PadProbeReturn.OK
