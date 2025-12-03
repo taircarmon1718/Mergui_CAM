@@ -78,8 +78,11 @@ class UserApp(app_callback_class):
         self.af_done = False
 
         self.focuser.set(Focuser.OPT_FOCUS, self.af_current_pos)
-        self.autofocus = AutoFocus(self.focuser, debug=True)
-        self.autofocus.startFocus()
+        self.autofocus = AutoFocus(self.focuser, camera=None, debug=True)
+
+        # for example: start AF immediately at startup
+        print("[INIT] Starting Initial AutoFocus...")
+        self.autofocus.startFocus_hailo()
         print("[INIT] Ready. Camera will move RIGHT in ~2 seconds.")
         print("=" * 40 + "\n")
 
