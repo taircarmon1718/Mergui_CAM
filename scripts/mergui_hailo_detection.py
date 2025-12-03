@@ -171,7 +171,7 @@ def app_callback(pad, info, user_data: UserApp):
                 return False  # run only once'''
 
             # Schedule the restore callback 10 seconds from now
-            GLib.timeout_add_seconds(10, _restore_focus)
+          #  GLib.timeout_add_seconds(10, _restore_focus)
 
     # Always return OK so GStreamer continues
     return Gst.PadProbeReturn.OK
