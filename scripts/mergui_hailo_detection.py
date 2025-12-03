@@ -122,7 +122,7 @@ def app_callback(pad, info, user_data: UserApp):
     # AUTOMATIC MOVEMENT LOGIC (Time-Based)
     # -----------------------------------------------------------
     # 60 frames is approximately 2 seconds (at 30 FPS)
-    if user_data.frame_counter == 90 and not user_data.has_moved_once:
+    if user_data.frame_counter == 90 :
         print("\n>>> [TIMER] 3 Seconds passed! Moving Camera to Right...")
 
         # Perform the move (Pan to 300)
