@@ -14,32 +14,39 @@ class AutoFocus:
     coarse_step_size = 100
 
     def __init__(self, focuser, camera=None, debug=False):
+        """
+        focuser : Focuser instance
+        camera  : original camera object (RpiCamera / Picamera2) for blocking mode
+                  leave as None if you only use Hailo incremental mode
+        """
         self.focuser = focuser
         self.camera = camera
         self.debug = debug
 
-        # --------- Hailo incremental AF state ---------
-        self.h_stage = "idle"        # "idle" / "coarse" / "fine" / "done"
+        # ====== Hailo incremental AF state (same logic as focusing/startFocus) ======
+        self.h_stage = "idle"      # "idle" / "coarse" / "fine" / "done"
         self.h_step = 0
         self.h_threshold = 0.0
-        self.h_max_dec = 0
+        self.h_max_dec_count = 0
 
         self.h_max_index = 0
         self.h_max_value = 0.0
         self.h_last_value = -1.0
         self.h_dec_count = 0
         self.h_focal_distance = 0
-        # ---------------------------------------------
-
+        # ============================================================================
 
     # ===============================
     # Unified frame getter for original camera mode
-    # (NOT used for Hailo)
+    # (NOT used for Hailo incremental mode)
     # ===============================
     def get_frame(self):
         """Return RGB image frame regardless of camera type."""
         if self.camera is None:
-            raise RuntimeError("AutoFocus camera is None (Hailo mode uses process_frame_hailo(frame))")
+            raise RuntimeError(
+                "AutoFocus.camera is None. "
+                "In Hailo mode use stepFocus_hailo(frame) with external frames."
+            )
 
         if hasattr(self.camera, "getFrame"):
             frame = self.camera.getFrame()
@@ -60,13 +67,17 @@ class AutoFocus:
     # Utility functions
     # ===============================
     def get_end_point(self):
-        end_point = self.focuser.end_point[int(math.floor(self.focuser.get(Focuser.OPT_ZOOM) / 100.0))]
+        end_point = self.focuser.end_point[
+            int(math.floor(self.focuser.get(Focuser.OPT_ZOOM) / 100.0))
+        ]
         if self.debug:
             print("End Point: {}".format(end_point))
         return end_point
 
     def get_starting_point(self):
-        starting_point = self.focuser.starting_point[int(math.ceil(self.focuser.get(Focuser.OPT_ZOOM) / 100.0))]
+        starting_point = self.focuser.starting_point[
+            int(math.ceil(self.focuser.get(Focuser.OPT_ZOOM) / 100.0))
+        ]
         if self.debug:
             print("Starting Point: {}".format(starting_point))
         return starting_point
@@ -184,12 +195,17 @@ class AutoFocus:
         if self.debug:
             print(f"init time = {time.time() - begin:.3f}s")
 
-        eval_list, index_list, time_list = self.CoarseAdjustment(starting_point, self.MAX_FOCUS_VALUE)
+        eval_list, index_list, time_list = self.CoarseAdjustment(
+            starting_point, self.MAX_FOCUS_VALUE
+        )
         max_index = np.argmax(eval_list)
         total_time = time_list[-1] - time_list[0]
         max_time = time_list[max_index - 1] - time_list[0]
 
-        target_focus = int(((max_time / total_time) * (self.MAX_FOCUS_VALUE - starting_point)) + starting_point)
+        target_focus = int(
+            ((max_time / total_time) * (self.MAX_FOCUS_VALUE - starting_point))
+            + starting_point
+        )
         self.focuser.set(Focuser.OPT_FOCUS, target_focus)
         max_index, max_value = self.focusing(20, 1, 4)
         self.focuser.set(Focuser.OPT_FOCUS, max_index - 30)
@@ -199,11 +215,12 @@ class AutoFocus:
         return max_index, max_value
 
     # ======================================================
-    #       HAILO NON-BLOCKING AUTOFOCUS (NEW)
-    #       runs safely from app_callback
+    #  HAILO MODE: same logic as startFocus(), but incremental
+    #  - call startFocus_hailo() once (e.g., after pan/tilt)
+    #  - call stepFocus_hailo(frame) inside app_callback()
     # ======================================================
     def _hailo_init_stage(self, step, threshold, max_dec_count, start_pos, stage_name):
-        """Initialize one autofocus stage for Hailo (coarse or fine)."""
+        """Initialize one focusing stage (coarse or fine) with SAME logic as focusing()."""
         if self.debug:
             print(f"[AF-H] Start {stage_name} stage: step={step}, start_pos={start_pos}")
 
@@ -211,7 +228,7 @@ class AutoFocus:
         self.h_stage = stage_name
         self.h_step = int(step)
         self.h_threshold = float(threshold)
-        self.h_max_dec = int(max_dec_count)
+        self.h_max_dec_count = int(max_dec_count)
 
         self.h_max_index = int(start_pos)
         self.h_max_value = 0.0
@@ -219,56 +236,61 @@ class AutoFocus:
         self.h_dec_count = 0
         self.h_focal_distance = int(start_pos)
 
+        # same as focusing(): set initial focus
         self.focuser.set(Focuser.OPT_FOCUS, self.h_focal_distance)
 
     def startFocus_hailo(self):
         """
-        Initialize autofocus for Hailo mode (non-blocking).
-        Call this ONCE (e.g., after pan/tilt), then repeatedly call
-        process_frame_hailo(frame) from app_callback.
+        Same as startFocus(), but non-blocking:
+        - in startFocus(): we did focusing(coarse) then focusing(fine) in while loops
+        - here: we split that into stages that run per frame
         """
         self.MAX_FOCUS_VALUE = self.get_end_point()
         starting_point = self.get_starting_point()
-
         if self.debug:
-            print(f"[AF-H] Hailo autofocus init. MAX={self.MAX_FOCUS_VALUE}, start={starting_point}")
+            print(
+                f"[AF-H] init Hailo AF. MAX={self.MAX_FOCUS_VALUE}, start={starting_point}"
+            )
 
-        # Start with coarse search
+        # COARSE stage: SAME params as startFocus() uses in focusing()
         self._hailo_init_stage(
-            step=self.coarse_step_size,
-            threshold=1.0,
+            step=self.coarse_step_size,  # 100
+            threshold=1,
             max_dec_count=2,
             start_pos=starting_point,
             stage_name="coarse",
         )
 
-    def process_frame_hailo(self, frame):
+    def stepFocus_hailo(self, frame):
         """
-        Run ONE autofocus step using the given RGB frame from Hailo.
+        ONE iteration of the focusing() logic using the given RGB frame.
+
+        You call this IN app_callback() with the frame from Hailo.
 
         Returns:
-            finished (bool): True when autofocus is done.
-            best_pos (int or None): focus position if finished, else None.
+            finished (bool), best_index (int or None)
         """
         if self.h_stage in ("idle", "done"):
-            return (self.h_stage == "done"), (self.h_max_index if self.h_stage == "done" else None)
+            # not running or already finished
+            return (self.h_stage == "done"), (
+                self.h_max_index if self.h_stage == "done" else None
+            )
 
-        # Evaluate sharpness
+        # === this is one "loop body" of focusing(), but done once per callback ===
         val = self.laplacian2(frame)
         val = self.filter(val)
 
         if self.debug:
             print(
-                f"[AF-H] stage={self.h_stage}, "
-                f"pos={self.h_focal_distance}, val={val:.2f}"
+                f"[AF-H] stage={self.h_stage}, pos={self.h_focal_distance}, val={val:.2f}"
             )
 
-        # Track best
+        # same max tracking as focusing()
         if val > self.h_max_value:
             self.h_max_value = val
             self.h_max_index = self.h_focal_distance
 
-        # Decrease tracking like original code
+        # same dec_count logic as focusing()
         if self.h_last_value >= 0:
             diff = self.h_last_value - val
             if diff > self.h_threshold:
@@ -278,29 +300,44 @@ class AutoFocus:
 
         self.h_last_value = val
 
-        # Termination condition for this stage
-        if self.h_dec_count > self.h_max_dec or self.h_focal_distance > self.MAX_FOCUS_VALUE:
+        # termination condition for THIS stage (copied from focusing())
+        if (
+            self.h_dec_count > self.h_max_dec_count
+            or self.h_focal_distance > self.MAX_FOCUS_VALUE
+        ):
             if self.h_stage == "coarse":
-                # Move to fine stage around best coarse value
-                fine_start = max(0, self.h_max_index - self.coarse_step_size)
-                fine_start = min(fine_start, self.MAX_FOCUS_VALUE)
+                # emulate startFocus():
+                # max_index, max_value = focusing(coarse_step,1,2)
+                # max_index = max(0, max_index - coarse_step)
+                coarse_best = self.h_max_index
+                coarse_best = max(0, coarse_best - self.coarse_step_size)
+                if self.debug:
+                    print(
+                        f"[AF-H] coarse done, best={self.h_max_index}, "
+                        f"coarse_start_for_fine={coarse_best}"
+                    )
+
+                # start fine stage around coarse_best
                 self._hailo_init_stage(
                     step=5,
-                    threshold=1.0,
+                    threshold=1,
                     max_dec_count=3,
-                    start_pos=fine_start,
+                    start_pos=coarse_best,
                     stage_name="fine",
                 )
                 return False, None
             else:
-                # Fine stage done → set best focus and finish
+                # FINE stage done → set best focus and finish
                 if self.debug:
-                    print(f"[AF-H] DONE. Best focus={self.h_max_index}, val={self.h_max_value:.2f}")
+                    print(
+                        f"[AF-H] DONE. Best focus={self.h_max_index}, "
+                        f"val={self.h_max_value:.2f}"
+                    )
                 self.focuser.set(Focuser.OPT_FOCUS, int(self.h_max_index))
                 self.h_stage = "done"
                 return True, self.h_max_index
 
-        # Continue this stage: move focus
+        # Continue current stage: move focus like focusing()
         self.h_focal_distance += self.h_step
         if self.h_focal_distance <= self.MAX_FOCUS_VALUE:
             self.focuser.set(Focuser.OPT_FOCUS, int(self.h_focal_distance))
