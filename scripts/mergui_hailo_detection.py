@@ -81,11 +81,16 @@ class UserApp(app_callback_class):
 
         # for example: start AF immediately at startup
         print("[INIT] Starting Initial AutoFocus...")
-        self.autofocus = AutoFocus(self.focuser, camera=None, debug=True)
 
-        # start AF once at startup (or call this after pan/tilt)
+        # autofocus object: we DON'T use camera here (frames come from Hailo)
+        self.autofocus = AutoFocus(self.focuser, camera=None)
+        self.autofocus.debug = True
+
+        # flag so AF runs only once until you restart it
+        self.af_done_once = False
+
+        # start incremental AF (equivalent to startFocus() init)
         self.autofocus.startFocus_hailo()
-        self.frame_counter = 0
         print("[INIT] Ready. Camera will move RIGHT in ~2 seconds.")
         print("=" * 40 + "\n")
 
