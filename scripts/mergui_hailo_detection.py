@@ -28,7 +28,7 @@ from hailo_apps.hailo_app_python.apps.detection.detection_pipeline import (
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, project_root)
 from B016712MP.Focuser import Focuser
-
+from B016712MP.AutoFocus import AutoFocus
 
 
 # =====================================================================
@@ -78,7 +78,8 @@ class UserApp(app_callback_class):
         self.af_done = False
 
         self.focuser.set(Focuser.OPT_FOCUS, self.af_current_pos)
-
+        self.autofocus = AutoFocus(self.focuser, debug=True)
+        self.autofocus.startFocus()
         print("[INIT] Ready. Camera will move RIGHT in ~2 seconds.")
         print("=" * 40 + "\n")
 
@@ -92,6 +93,7 @@ def app_callback(pad, info, user_data: UserApp):
         return Gst.PadProbeReturn.OK
 
     # Increment frame counter
+    roi = hailo.get_roi_from_buffer(buffer)
     user_data.frame_counter += 1
 
     # -----------------------------------------------------------
