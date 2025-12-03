@@ -140,11 +140,8 @@ def app_callback(pad, info, user_data: UserApp):
             print(f"!!! [AF-H] FINISHED! Best Focus Position: {best_pos} !!!")
             user_data.is_focusing = False
             print(f"focous on {best_pos} ")
-            user_data.focuser.set(Focuser.OPT_FOCUS, best_pos)
-            time.sleep(10)
-            print("check")
-            user_data.focuser.set(Focuser.OPT_FOCUS, 200)
-            time.sleep(5)
+           # user_data.focuser.set(Focuser.OPT_FOCUS, best_pos)
+
     # ----------------------------------------
     # this run all the time
     # ----------------------------------------
