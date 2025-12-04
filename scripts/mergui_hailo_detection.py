@@ -2,6 +2,7 @@
 import os
 import sys
 import time
+import threading
 import argparse
 import gi
 import cv2
@@ -30,7 +31,35 @@ from B016712MP.Focuser import Focuser
 from B016712MP.AutoFocus import AutoFocus
 
 
+# =====================================================================
+# 1. INPUT THREAD (Runs in parallel)
+# =====================================================================
+def user_input_loop(user_data):
+    """
+    This runs in the background. It waits for you to type.
+    """
+    print(">>> THREAD: Input listener started.")
+    print(">>> THREAD: Type 'hi' to change the flag, or 'quit' to exit.")
 
+    while True:
+        try:
+            # This line BLOCKS. It waits for you.
+            # Because it is in a thread, it does NOT stop the video.
+            cmd = input("Command > ").strip().lower()
+
+            if cmd == 'hi':
+                print(f"\n[User typed 'hi'] -> Changing status!")
+                user_data.user_message = "Hello from Terminal!"
+
+            elif cmd == 'quit':
+                print("Exiting...")
+                os._exit(0)  # Force kill everything
+
+            else:
+                print(f"Unknown command: {cmd}")
+
+        except EOFError:
+            break
 # =====================================================================
 # USER APP CLASS
 # =====================================================================
@@ -209,6 +238,8 @@ if __name__ == "__main__":
     print("[MAIN] Starting Pipeline...")
 
     user_data = UserApp()
+    input_t = threading.Thread(target=user_input_loop, args=(user_data,), daemon=True)
+    input_t.start()
     app = GStreamerDetectionApp(app_callback, user_data)
 
     try:
