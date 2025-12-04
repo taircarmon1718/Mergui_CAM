@@ -81,7 +81,7 @@ class UserApp(app_callback_class):
             time.sleep(0.5)
 
             # Start Center
-            self.center_pan = 0
+            self.center_pan = 90
             self.center_tilt = 25
 
             print("[INIT] Setting Home Position...")
@@ -193,16 +193,39 @@ def app_callback(pad, info, user_data: UserApp):
                 # If X > 0.5 (Right side), Error is Positive
                 error_x = center_x - 0.5
 
+                norm_x = bbox.xmin()
+                norm_y = bbox.ymin()
+
+
+                pixel_x = int(norm_x * w)
+                pixel_y = int(norm_y * h)
+
+                print(f"Normalized: ({norm_x:.2f}, {norm_y:.2f})  -->  Pixels: ({pixel_x}, {pixel_y})")
+
+                back_to_norm_x = pixel_x / w
+                back_to_norm_y = pixel_y / h
+
+
+                print(f"Check Back: ({back_to_norm_x:.2f}, {back_to_norm_y:.2f})")
+
+
+                print("distance between object and center:", abs(error_x))
+                normalized_error_x = int (center_x *w)
+                print("normalized error x in pixels:", normalized_error_x)
+
+
                 # 2. Deadzone (Don't move if error is small, e.g. < 5%)
                 if abs(error_x) > 0.2:
 
-                    # 3. Calculate New Pan
-                    # 'track_gain' is now defined in __init__
-                    move_amount = error_x * user_data.track_gain
-                    new_pan = int(user_data.current_pan - move_amount)
-
+                    # 3. Calculate New Pan Position
+                    A_current = user_data.current_pan
+                    A_c = (pixel_x -640 ) / 13.3
+                    print("A_current:", A_current)
+                    print("A_c:", A_c)
+                    new_pan = int(A_current + A_c)
+                    print("new_pan:", new_pan)
                     # 4. Clamp Limits (0 to 1000)
-                    new_pan = max(0, min(1000, new_pan))
+                    new_pan = max(0, min(180, new_pan))
 
                     # 5. Move Motor (Only if changed significantly)
                     if abs(new_pan - user_data.current_pan) > 2:
