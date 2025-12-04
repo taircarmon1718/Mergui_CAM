@@ -114,6 +114,13 @@ class UserApp(app_callback_class):
         self.autofocus.debug = True
         self.autofocus.startFocus_hailo()
         self.info_printed = False
+
+
+        # ======================================================
+        # NEW: Non-blocking cooldown for PTZ moves
+        # ======================================================
+        self.last_move_time = 0.0      # time of last PTZ move
+        self.move_cooldown = 0.5       # seconds between moves (tune this)
         print("[INIT] Ready.")
         print("=" * 40 + "\n")
 
@@ -230,14 +237,19 @@ def app_callback(pad, info, user_data: UserApp):
 
                     # 5. Move Motor (Only if changed significantly)
                     if abs(new_pan - user_data.current_pan) > 2:
-                        user_data.focuser.set(Focuser.OPT_MOTOR_X, new_pan)
-                        time.sleep(5)
-                        print("[INIT] Moving to new pan...")
-                        # Small delay to allow motor to start moving
-                        user_data.current_pan = new_pan
-
-                        # --- ADDED: SET COOLDOWN ---
-                        user_data.track_wait_counter = 5
+                        # --------------------------------------------------------
+                        # Non-blocking cooldown using time.monotonic()
+                        # --------------------------------------------------------
+                        now = time.monotonic()
+                        if now - user_data.last_move_time >= user_data.move_cooldown:
+                            print("[TRACK] Moving to new pan...")
+                            user_data.focuser.set(Focuser.OPT_MOTOR_X, new_pan)
+                            user_data.current_pan = new_pan
+                            user_data.last_move_time = now
+                        else:
+                            # Optional: debug to see how often it wants to move
+                            remaining = user_data.move_cooldown - (now - user_data.last_move_time)
+                            print(f"[TRACK] Cooldown active, skipping move ({remaining:.2f}s left)")
 
     return Gst.PadProbeReturn.OK
 
