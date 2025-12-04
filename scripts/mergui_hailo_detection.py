@@ -165,33 +165,52 @@ def app_callback(pad, info, user_data: UserApp):
         confidence = det.get_confidence()
 
         if label == "person" and confidence > 0.5:
-            # --- GET ID ---
+            # Get ID
             track_id = -1
-            # Extract Unique ID from the detection object
             for obj in det.get_objects_typed(hailo.HAILO_UNIQUE_ID):
                 track_id = obj.get_id()
 
-            # --- FILTER BY ID ---
-            # If we are looking for a specific ID (not -1)
-            if user_data.target_id != -1:
-                if track_id != user_data.target_id:
-                    continue  # Skip this person if it's not the one we want
+            # Filter by Target ID
+            if user_data.target_id != -1 and track_id != user_data.target_id:
+                continue
 
-            # If we reached here, it's either the target ID or we are showing everyone
-
+                # Get Coordinates
             bbox = det.get_bbox()
             center_x = bbox.xmin() + (bbox.width() / 2)
             center_y = bbox.ymin() + (bbox.height() / 2)
 
-            prefix = ">>> DETECTED"
+            print(f"*** TARGET LOCKED [{track_id}] ***: Pos: X={center_x:.2f}")
+
+            # =========================================================
+            # TRACKING LOGIC (Horizontal Only)
+            # =========================================================
             if user_data.target_id != -1:
-                prefix = f"*** TARGET LOCKED [{track_id}] ***"
 
-            print(f"{prefix}: Person | ID: {track_id} | Pos: X={center_x:.2f}, Y={center_y:.2f}")
+                # 1. Calculate Error (Center is 0.5)
+                # If X > 0.5 (Right side), Error is Positive
+                error_x = center_x - 0.5
 
-    # Always return OK so GStreamer continues
+                # 2. Deadzone (Don't move if error is small, e.g. < 5%)
+                if abs(error_x) > 0.05:
+
+                    # 3. Calculate New Pan
+                    # Note: We subtract because usually:
+                    # - Object on Right (x > 0.5) -> We need to turn Right (Increase Pan?)
+                    # - Let's use negative feedback: `new = current - (err * gain)`
+                    # - If direction is wrong, change (-) to (+) here:
+                    move_amount = error_x * user_data.track_gain
+                    new_pan = int(user_data.current_pan - move_amount)
+
+                    # 4. Clamp Limits (0 to 1000)
+                    new_pan = max(0, min(1000, new_pan))
+
+                    # 5. Move Motor (Only if changed significantly)
+                    if abs(new_pan - user_data.current_pan) > 2:
+                        user_data.focuser.set(Focuser.OPT_MOTOR_X, new_pan)
+                        user_data.current_pan = new_pan
+                        # print(f"   -> Moving Pan to {new_pan}")
+
     return Gst.PadProbeReturn.OK
-
 
 # =====================================================================
 # MAIN EXECUTION
