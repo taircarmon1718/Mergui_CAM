@@ -32,19 +32,32 @@ from B016712MP.AutoFocus import AutoFocus
 
 
 # =====================================================================
-# 1. INPUT THREAD
+# 1. INPUT THREAD (Runs in parallel)
 # =====================================================================
 def user_input_loop(user_data):
-    print("\n>>> THREAD: Type a number (ID) to track, or -1 to see all.\n")
+    """
+    This runs in the background. It waits for you to type an ID.
+    """
+    print("\n>>> THREAD: Input listener started.")
+    print(">>> THREAD: Type a number (ID) to track, or -1 to stop tracking.\n")
+
     while True:
         try:
-            user_input = input()
+            # This line waits for you to type in the terminal
+            print("Enter ID to track > ", end="", flush=True)
+            user_input = input()  # Waits for Enter
+
+            # Convert string to integer
             new_id = int(user_input)
+
+            # Update the shared object
             user_data.target_id = new_id
+
             if new_id == -1:
-                print(f" [SYSTEM] Tracking Mode: IDLE (Show All)")
+                print(f" [SYSTEM] Tracking Mode: IDLE (Monitoring only)")
             else:
                 print(f" [SYSTEM] Tracking Mode: LOCKED ON ID {new_id}")
+
         except ValueError:
             print(" [ERROR] Please enter a valid number.")
         except EOFError:
@@ -80,30 +93,31 @@ class UserApp(app_callback_class):
         except Exception as e:
             print(f"[ERROR] PTZ Init failed: {e}")
 
+        # State Variables
         self.target_id = -1
         self.frame_counter = 0
-        self.info_printed = False
 
-        # Software state
+        # --- NEW: Cooldown counter for tracking ---
+        self.track_wait_counter = 0
+
+        # Current Motor Positions (Software State)
         self.current_pan = self.center_pan
         self.current_tilt = self.center_tilt
 
-        # Tracking Logic
-        self.pixels_per_degree = 13.3
-        self.pan_direction = 1
+        self.track_gain = 30  # Controls tracking speed
 
-        # --- NEW: COOLDOWN TIMER ---
-        self.move_cooldown = 0  # Counter to wait between moves
-
-        # Autofocus
+        # Autofocus logic
         self.is_focusing = True
         self.focuser.set(Focuser.OPT_FOCUS, 200)
 
         print("[INIT] Starting Initial AutoFocus...")
+
+        # Using the Library AutoFocus as you requested
         self.autofocus = AutoFocus(self.focuser, camera=None)
         self.autofocus.debug = True
         self.autofocus.startFocus_hailo()
 
+        self.info_printed = False
         print("[INIT] Ready.")
         print("=" * 40 + "\n")
 
@@ -119,30 +133,35 @@ def app_callback(pad, info, user_data: UserApp):
     roi = hailo.get_roi_from_buffer(buffer)
     user_data.frame_counter += 1
 
-    # Decrease cooldown
-    if user_data.move_cooldown > 0:
-        user_data.move_cooldown -= 1
+    # --- DECREMENT TRACKING COOLDOWN ---
+    if user_data.track_wait_counter > 0:
+        user_data.track_wait_counter -= 1
 
     fmt, w, h = get_caps_from_pad(pad)
     frame = get_numpy_from_buffer(buffer, fmt, w, h)
 
+    # -------------------------------------------------------------
+    # PRINT SCREEN INFO ONCE (When first frame arrives)
+    # -------------------------------------------------------------
     if not user_data.info_printed:
-        print(f"\n# VIDEO RESOLUTION: {w} x {h}")
-        print(f"# SCREEN CENTER X: {w // 2}")
+        print("\n" + "#" * 60)
+        print(f"# VIDEO STREAM STARTED SUCCESSFULLY")
+        print(f"# RESOLUTION: {w} x {h} pixels")
+        print("#" * 60)
         user_data.info_printed = True
 
     if frame is None:
         return Gst.PadProbeReturn.OK
 
-    # --- AUTOFOCUS ---
+    # --- AUTOFOCUS STEP (Existing Logic) ---
     if user_data.is_focusing:
         finished, best_pos = user_data.autofocus.stepFocus_hailo(frame)
         if finished:
-            print(f"!!! [AF] FINISHED! Best Focus: {best_pos} !!!")
+            print(f"!!! [AF-H] FINISHED! Best Focus: {best_pos} !!!")
             user_data.is_focusing = False
             user_data.focuser.set(Focuser.OPT_FOCUS, best_pos)
 
-    # --- TRACKING ---
+    # --- DETECTION & TRACKING ---
     detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
 
     for det in detections:
@@ -150,50 +169,67 @@ def app_callback(pad, info, user_data: UserApp):
         confidence = det.get_confidence()
 
         if label == "person" and confidence > 0.5:
+            # Get ID
             track_id = -1
             for obj in det.get_objects_typed(hailo.HAILO_UNIQUE_ID):
                 track_id = obj.get_id()
 
-            if user_data.target_id != -1 and track_id != user_data.target_id:
-                continue
+            # Filter by Target ID
+            if user_data.target_id != -1:
+                if track_id != user_data.target_id:
+                    continue  # Skip detection if it's not the target
 
-                # Calculate Center
-            bbox = det.get_bbox()
-            norm_center_x = bbox.xmin() + (bbox.width() / 2)
+                # If we are here, we found the target!
 
-            # 1. Convert to Pixels
-            pixel_x = int(norm_center_x * w)
+                # Get Coordinates
+                bbox = det.get_bbox()
+                center_x = bbox.xmin() + (bbox.width() / 2)
 
-            # 2. Calculate Error
-            screen_center_x = w // 2
-            pixel_error = pixel_x - screen_center_x
+                print(f"*** TRACKING ID [{track_id}] ***: Pos: X={center_x:.2f}")
 
-            # Print status
-            if user_data.frame_counter % 10 == 0:  # Print only sometimes to reduce spam
-                print(f"*** ID [{track_id}] *** X: {pixel_x} | Err: {pixel_error}px")
+                # =========================================================
+                # TRACKING LOGIC (Horizontal Only)
+                # =========================================================
 
-            # --- MOVE LOGIC (With Cooldown) ---
-            if user_data.move_cooldown == 0:
+                # --- CHECK COOLDOWN: If we moved recently, WAIT. ---
+                if user_data.track_wait_counter > 0:
+                    continue  # Skip motor updates this frame
 
-                # 3. Calculate Degrees
-                degrees_to_move = pixel_error / user_data.pixels_per_degree
-                adjustment = degrees_to_move * user_data.pan_direction
+                # 1. Calculate Error (Center is 0.5)
+                # If X > 0.5 (Right side), Error is Positive
+                error_x = center_x - 0.5
 
-                # Only move if error is significant (> 2 degrees)
-                if abs(adjustment) > 2:
-                    new_pan = int(user_data.current_pan + adjustment)
+                norm_x = bbox.xmin()
+                pixel_x = int(norm_x * w)
 
-                    # Clamp
+                # 2. Deadzone (Don't move if error is small, e.g. < 20%)
+                if abs(error_x) > 0.2:
+
+                    # 3. Calculate New Pan Position using your formula
+                    A_current = user_data.current_pan
+
+                    # Your logic: (pixel_x - 640) / 13.3
+                    # This calculates the EXACT angle difference
+                    A_c = ((pixel_x - 640) / 13.3) /2
+
+                    print(f"Current Pan: {A_current} | Correction (Ac): {A_c:.2f}")
+
+                    new_pan = int(A_current + A_c)
+                    print("Calculated New Pan:", new_pan)
+
+                    # 4. Clamp Limits (0 to 180 degrees)
                     new_pan = max(0, min(180, new_pan))
 
-                    if new_pan != user_data.current_pan:
-                        print(f"   >>> MOVING: {adjustment:.1f}deg -> NewPan: {new_pan}")
-
+                    # 5. Move Motor (Only if changed significantly to avoid jitter)
+                    if abs(new_pan - user_data.current_pan) > 2:
                         user_data.focuser.set(Focuser.OPT_MOTOR_X, new_pan)
                         user_data.current_pan = new_pan
+                        print(f">>> MOVING PAN TO: {new_pan}")
 
-                        # SET COOLDOWN: Wait 15 frames (0.5 sec) before moving again!
-                        user_data.move_cooldown = 15
+                        # --- SET COOLDOWN ---
+                        # Wait 5 frames (approx 0.15s) before tracking again
+                        # This solves the "over-correction" problem
+                        user_data.track_wait_counter = 5
 
     return Gst.PadProbeReturn.OK
 
@@ -216,6 +252,8 @@ if __name__ == "__main__":
     print("[MAIN] Starting Pipeline...")
 
     user_data = UserApp()
+
+    # Input Thread (Daemon ensures it closes when main app closes)
     input_t = threading.Thread(target=user_input_loop, args=(user_data,), daemon=True)
     input_t.start()
 
