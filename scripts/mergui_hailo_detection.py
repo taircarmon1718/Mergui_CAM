@@ -113,7 +113,7 @@ class UserApp(app_callback_class):
         self.autofocus = AutoFocus(self.focuser, camera=None)
         self.autofocus.debug = True
         self.autofocus.startFocus_hailo()
-
+        self.info_printed = False
         print("[INIT] Ready.")
         print("=" * 40 + "\n")
 
@@ -131,6 +131,23 @@ def app_callback(pad, info, user_data: UserApp):
 
     fmt, w, h = get_caps_from_pad(pad)
     frame = get_numpy_from_buffer(buffer, fmt, w, h)
+    # -------------------------------------------------------------
+    # PRINT SCREEN INFO ONCE (When first frame arrives)
+    # -------------------------------------------------------------
+    if not user_data.info_printed:
+        print("\n" + "#" * 60)
+        print(f"# VIDEO STREAM STARTED SUCCESSFULLY")
+        print(f"# RESOLUTION: {w} x {h} pixels")
+        print("#" * 60)
+        print(f"# COORDINATE SYSTEM MAP:")
+        print(f"# ----------------------")
+        print(f"# Top-Left:     (0, 0)          -> Norm: (0.0, 0.0)")
+        print(f"# Top-Right:    ({w}, 0)       -> Norm: (1.0, 0.0)")
+        print(f"# Center:       ({w // 2}, {h // 2})        -> Norm: (0.5, 0.5)")
+        print(f"# Bottom-Left:  (0, {h})        -> Norm: (0.0, 1.0)")
+        print(f"# Bottom-Right: ({w}, {h})     -> Norm: (1.0, 1.0)")
+        print("#" * 60 + "\n")
+        user_data.info_printed = True
     if frame is None:
         return Gst.PadProbeReturn.OK
 
@@ -165,7 +182,7 @@ def app_callback(pad, info, user_data: UserApp):
             center_x = bbox.xmin() + (bbox.width() / 2)
             center_y = bbox.ymin() + (bbox.height() / 2)
 
-            print(f"*** TARGET LOCKED [{track_id}] ***: Pos: X={center_x:.2f}")
+            print(f"*** TARGET  [{track_id}] ***: Pos: X={center_x:.2f}")
 
             # =========================================================
             # TRACKING LOGIC (Horizontal Only)
@@ -177,7 +194,7 @@ def app_callback(pad, info, user_data: UserApp):
                 error_x = center_x - 0.5
 
                 # 2. Deadzone (Don't move if error is small, e.g. < 5%)
-                if abs(error_x) > 0.05:
+                if abs(error_x) > 0.2:
 
                     # 3. Calculate New Pan
                     # 'track_gain' is now defined in __init__
