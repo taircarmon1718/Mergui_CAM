@@ -219,7 +219,7 @@ def app_callback(pad, info, user_data: UserApp):
 
                     # 3. Calculate New Pan Position
                     A_current = user_data.current_pan
-                    A_c = (pixel_x -640 ) / 13.3
+                    A_c = ((pixel_x -640 ) / 13.3)/2
                     print("A_current:", A_current)
                     print("A_c:", A_c)
                     new_pan = int(A_current + A_c)
