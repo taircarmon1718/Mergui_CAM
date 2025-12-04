@@ -39,11 +39,12 @@ def user_input_loop(user_data):
     This runs in the background. It waits for you to type an ID.
     """
     print("\n>>> THREAD: Input listener started.")
-    print(">>> THREAD: Type a number (ID) to track, or -1 to see all.\n")
+    print(">>> THREAD: Type a number (ID) to track, or -1 to stop tracking.\n")
 
     while True:
         try:
             # This line waits for you to type in the terminal
+            print("Enter ID to track > ", end="", flush=True)
             user_input = input()  # Waits for Enter
 
             # Convert string to integer
@@ -53,7 +54,7 @@ def user_input_loop(user_data):
             user_data.target_id = new_id
 
             if new_id == -1:
-                print(f" [SYSTEM] Tracking Mode: IDLE (Show All)")
+                print(f" [SYSTEM] Tracking Mode: IDLE (Monitoring only)")
             else:
                 print(f" [SYSTEM] Tracking Mode: LOCKED ON ID {new_id}")
 
@@ -96,11 +97,13 @@ class UserApp(app_callback_class):
         self.target_id = -1
         self.frame_counter = 0
 
+        # --- NEW: Cooldown counter for tracking ---
+        self.track_wait_counter = 0
+
         # Current Motor Positions (Software State)
         self.current_pan = self.center_pan
         self.current_tilt = self.center_tilt
 
-        # --- FIX: This was missing and caused the crash ---
         self.track_gain = 30  # Controls tracking speed
 
         # Autofocus logic
@@ -113,6 +116,7 @@ class UserApp(app_callback_class):
         self.autofocus = AutoFocus(self.focuser, camera=None)
         self.autofocus.debug = True
         self.autofocus.startFocus_hailo()
+
         self.info_printed = False
         print("[INIT] Ready.")
         print("=" * 40 + "\n")
@@ -129,8 +133,13 @@ def app_callback(pad, info, user_data: UserApp):
     roi = hailo.get_roi_from_buffer(buffer)
     user_data.frame_counter += 1
 
+    # --- DECREMENT TRACKING COOLDOWN ---
+    if user_data.track_wait_counter > 0:
+        user_data.track_wait_counter -= 1
+
     fmt, w, h = get_caps_from_pad(pad)
     frame = get_numpy_from_buffer(buffer, fmt, w, h)
+
     # -------------------------------------------------------------
     # PRINT SCREEN INFO ONCE (When first frame arrives)
     # -------------------------------------------------------------
@@ -139,15 +148,8 @@ def app_callback(pad, info, user_data: UserApp):
         print(f"# VIDEO STREAM STARTED SUCCESSFULLY")
         print(f"# RESOLUTION: {w} x {h} pixels")
         print("#" * 60)
-        print(f"# COORDINATE SYSTEM MAP:")
-        print(f"# ----------------------")
-        print(f"# Top-Left:     (0, 0)          -> Norm: (0.0, 0.0)")
-        print(f"# Top-Right:    ({w}, 0)       -> Norm: (1.0, 0.0)")
-        print(f"# Center:       ({w // 2}, {h // 2})        -> Norm: (0.5, 0.5)")
-        print(f"# Bottom-Left:  (0, {h})        -> Norm: (0.0, 1.0)")
-        print(f"# Bottom-Right: ({w}, {h})     -> Norm: (1.0, 1.0)")
-        print("#" * 60 + "\n")
         user_data.info_printed = True
+
     if frame is None:
         return Gst.PadProbeReturn.OK
 
@@ -177,60 +179,57 @@ def app_callback(pad, info, user_data: UserApp):
                 if track_id != user_data.target_id:
                     continue  # Skip detection if it's not the target
 
-            # Get Coordinates
-            bbox = det.get_bbox()
-            center_x = bbox.xmin() + (bbox.width() / 2)
-            center_y = bbox.ymin() + (bbox.height() / 2)
+                # If we are here, we found the target!
 
-            print(f"*** TARGET  [{track_id}] ***: Pos: X={center_x:.2f}")
+                # Get Coordinates
+                bbox = det.get_bbox()
+                center_x = bbox.xmin() + (bbox.width() / 2)
 
-            # =========================================================
-            # TRACKING LOGIC (Horizontal Only)
-            # =========================================================
-            if user_data.target_id != -1:
+                print(f"*** TRACKING ID [{track_id}] ***: Pos: X={center_x:.2f}")
+
+                # =========================================================
+                # TRACKING LOGIC (Horizontal Only)
+                # =========================================================
+
+                # --- CHECK COOLDOWN: If we moved recently, WAIT. ---
+                if user_data.track_wait_counter > 0:
+                    continue  # Skip motor updates this frame
 
                 # 1. Calculate Error (Center is 0.5)
                 # If X > 0.5 (Right side), Error is Positive
                 error_x = center_x - 0.5
 
                 norm_x = bbox.xmin()
-                norm_y = bbox.ymin()
-
-
                 pixel_x = int(norm_x * w)
-                pixel_y = int(norm_y * h)
 
-                print(f"Normalized: ({norm_x:.2f}, {norm_y:.2f})  -->  Pixels: ({pixel_x}, {pixel_y})")
-
-                back_to_norm_x = pixel_x / w
-                back_to_norm_y = pixel_y / h
-
-
-                print(f"Check Back: ({back_to_norm_x:.2f}, {back_to_norm_y:.2f})")
-
-
-                print("distance between object and center:", abs(error_x))
-                normalized_error_x = int (center_x *w)
-                print("normalized error x in pixels:", normalized_error_x)
-
-
-                # 2. Deadzone (Don't move if error is small, e.g. < 5%)
+                # 2. Deadzone (Don't move if error is small, e.g. < 20%)
                 if abs(error_x) > 0.2:
 
-                    # 3. Calculate New Pan Position
+                    # 3. Calculate New Pan Position using your formula
                     A_current = user_data.current_pan
-                    A_c = (pixel_x -640 ) / 13.3
-                    print("A_current:", A_current)
-                    print("A_c:", A_c)
+
+                    # Your logic: (pixel_x - 640) / 13.3
+                    # This calculates the EXACT angle difference
+                    A_c = ((pixel_x - 640) / 13.3) /2
+
+                    print(f"Current Pan: {A_current} | Correction (Ac): {A_c:.2f}")
+
                     new_pan = int(A_current + A_c)
-                    print("new_pan:", new_pan)
-                    # 4. Clamp Limits (0 to 1000)
+                    print("Calculated New Pan:", new_pan)
+
+                    # 4. Clamp Limits (0 to 180 degrees)
                     new_pan = max(0, min(180, new_pan))
 
-                    # 5. Move Motor (Only if changed significantly)
+                    # 5. Move Motor (Only if changed significantly to avoid jitter)
                     if abs(new_pan - user_data.current_pan) > 2:
                         user_data.focuser.set(Focuser.OPT_MOTOR_X, new_pan)
                         user_data.current_pan = new_pan
+                        print(f">>> MOVING PAN TO: {new_pan}")
+
+                        # --- SET COOLDOWN ---
+                        # Wait 5 frames (approx 0.15s) before tracking again
+                        # This solves the "over-correction" problem
+                        user_data.track_wait_counter = 5
 
     return Gst.PadProbeReturn.OK
 
@@ -254,7 +253,7 @@ if __name__ == "__main__":
 
     user_data = UserApp()
 
-    # Input Thread
+    # Input Thread (Daemon ensures it closes when main app closes)
     input_t = threading.Thread(target=user_input_loop, args=(user_data,), daemon=True)
     input_t.start()
 
