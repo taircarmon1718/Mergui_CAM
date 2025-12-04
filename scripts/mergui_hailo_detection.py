@@ -81,7 +81,7 @@ class UserApp(app_callback_class):
             time.sleep(0.5)
 
             # Start Center
-            self.center_pan = 0
+            self.center_pan = 90
             self.center_tilt = 25
 
             print("[INIT] Setting Home Position...")
