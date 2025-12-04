@@ -36,15 +36,20 @@ from B016712MP.AutoFocus import AutoFocus
 # =====================================================================
 def user_input_loop(user_data):
     """
-    Waits for user to type an ID in the terminal.
+    This runs in the background. It waits for you to type an ID.
     """
     print("\n>>> THREAD: Input listener started.")
     print(">>> THREAD: Type a number (ID) to track, or -1 to see all.\n")
 
     while True:
         try:
+            # This line waits for you to type in the terminal
             user_input = input()  # Waits for Enter
+
+            # Convert string to integer
             new_id = int(user_input)
+
+            # Update the shared object
             user_data.target_id = new_id
 
             if new_id == -1:
@@ -95,14 +100,16 @@ class UserApp(app_callback_class):
         self.current_pan = self.center_pan
         self.current_tilt = self.center_tilt
 
-        # --- FIX: Define track_gain here ---
-        self.track_gain = 30
+        # --- FIX: This was missing and caused the crash ---
+        self.track_gain = 30  # Controls tracking speed
 
         # Autofocus logic
         self.is_focusing = True
         self.focuser.set(Focuser.OPT_FOCUS, 200)
 
         print("[INIT] Starting Initial AutoFocus...")
+
+        # Using the Library AutoFocus as you requested
         self.autofocus = AutoFocus(self.focuser, camera=None)
         self.autofocus.debug = True
         self.autofocus.startFocus_hailo()
@@ -127,11 +134,11 @@ def app_callback(pad, info, user_data: UserApp):
     if frame is None:
         return Gst.PadProbeReturn.OK
 
-    # --- AUTOFOCUS STEP ---
+    # --- AUTOFOCUS STEP (Existing Logic) ---
     if user_data.is_focusing:
         finished, best_pos = user_data.autofocus.stepFocus_hailo(frame)
         if finished:
-            print(f"!!! [AF] FINISHED! Best Focus: {best_pos} !!!")
+            print(f"!!! [AF-H] FINISHED! Best Focus: {best_pos} !!!")
             user_data.is_focusing = False
             user_data.focuser.set(Focuser.OPT_FOCUS, best_pos)
 
@@ -149,10 +156,11 @@ def app_callback(pad, info, user_data: UserApp):
                 track_id = obj.get_id()
 
             # Filter by Target ID
-            if user_data.target_id != -1 and track_id != user_data.target_id:
-                continue
+            if user_data.target_id != -1:
+                if track_id != user_data.target_id:
+                    continue  # Skip detection if it's not the target
 
-                # Get Coordinates
+            # Get Coordinates
             bbox = det.get_bbox()
             center_x = bbox.xmin() + (bbox.width() / 2)
             center_y = bbox.ymin() + (bbox.height() / 2)
@@ -165,13 +173,14 @@ def app_callback(pad, info, user_data: UserApp):
             if user_data.target_id != -1:
 
                 # 1. Calculate Error (Center is 0.5)
+                # If X > 0.5 (Right side), Error is Positive
                 error_x = center_x - 0.5
 
                 # 2. Deadzone (Don't move if error is small, e.g. < 5%)
                 if abs(error_x) > 0.05:
 
                     # 3. Calculate New Pan
-                    # 'track_gain' is now properly defined in __init__
+                    # 'track_gain' is now defined in __init__
                     move_amount = error_x * user_data.track_gain
                     new_pan = int(user_data.current_pan - move_amount)
 
