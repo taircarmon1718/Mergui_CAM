@@ -96,9 +96,6 @@ class UserApp(app_callback_class):
         self.target_id = -1
         self.frame_counter = 0
 
-        # --- NEW: Cooldown counter ---
-        self.track_wait_counter = 0
-
         # Current Motor Positions (Software State)
         self.current_pan = self.center_pan
         self.current_tilt = self.center_tilt
@@ -131,10 +128,6 @@ def app_callback(pad, info, user_data: UserApp):
 
     roi = hailo.get_roi_from_buffer(buffer)
     user_data.frame_counter += 1
-
-    # --- DECREMENT COOLDOWN ---
-    if user_data.track_wait_counter > 0:
-        user_data.track_wait_counter -= 1
 
     fmt, w, h = get_caps_from_pad(pad)
     frame = get_numpy_from_buffer(buffer, fmt, w, h)
@@ -196,17 +189,13 @@ def app_callback(pad, info, user_data: UserApp):
             # =========================================================
             if user_data.target_id != -1:
 
-                # --- CHECK COOLDOWN ---
-                # אם זזנו לאחרונה, לא לעשות כלום ולחכות
-                if user_data.track_wait_counter > 0:
-                    continue
-
-                    # 1. Calculate Error (Center is 0.5)
+                # 1. Calculate Error (Center is 0.5)
                 # If X > 0.5 (Right side), Error is Positive
                 error_x = center_x - 0.5
 
                 norm_x = bbox.xmin()
                 norm_y = bbox.ymin()
+
 
                 pixel_x = int(norm_x * w)
                 pixel_y = int(norm_y * h)
@@ -216,18 +205,21 @@ def app_callback(pad, info, user_data: UserApp):
                 back_to_norm_x = pixel_x / w
                 back_to_norm_y = pixel_y / h
 
+
                 print(f"Check Back: ({back_to_norm_x:.2f}, {back_to_norm_y:.2f})")
 
+
                 print("distance between object and center:", abs(error_x))
-                normalized_error_x = int(center_x * w)
+                normalized_error_x = int (center_x *w)
                 print("normalized error x in pixels:", normalized_error_x)
+
 
                 # 2. Deadzone (Don't move if error is small, e.g. < 5%)
                 if abs(error_x) > 0.2:
 
                     # 3. Calculate New Pan Position
                     A_current = user_data.current_pan
-                    A_c = (pixel_x - 640) / 13.3
+                    A_c = (pixel_x -640 ) / 13.3
                     print("A_current:", A_current)
                     print("A_c:", A_c)
                     new_pan = int(A_current + A_c)
@@ -239,10 +231,6 @@ def app_callback(pad, info, user_data: UserApp):
                     if abs(new_pan - user_data.current_pan) > 2:
                         user_data.focuser.set(Focuser.OPT_MOTOR_X, new_pan)
                         user_data.current_pan = new_pan
-
-                        # --- SET COOLDOWN ---
-                        # מחכים 5 פריימים אחרי הזזה כדי לתת למערכת להתייצב
-                        user_data.track_wait_counter = 5
 
     return Gst.PadProbeReturn.OK
 
