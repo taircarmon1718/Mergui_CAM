@@ -226,7 +226,7 @@ def app_callback(pad, info, user_data: UserApp):
                     A_current = user_data.current_pan
 
                     # --- YOUR LOGIC KEPT EXACTLY AS IS ---
-                    A_c = ((pixel_x - 640) / 13.3)
+                    A_c = ((pixel_x - 640) / 13.3)/2
 
                     print("A_current:", A_current)
                     print("A_c:", A_c)
