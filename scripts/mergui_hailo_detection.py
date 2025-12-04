@@ -175,12 +175,12 @@ def app_callback(pad, info, user_data: UserApp):
         confidence = det.get_confidence()
 
 
-        if label == "person" and confidence > 0.5:
+        if label == "person" and confidence > 0.9:
             bbox = det.get_bbox()
             center_x = bbox.xmin() + (bbox.width() / 2)
             center_y = bbox.ymin() + (bbox.height() / 2)
 
-            # הדפסה ברורה לטרמינל
+
             print(f">>> DETECTED: {label.upper()} | Conf: {confidence:.2f} | Pos: X={center_x:.2f}, Y={center_y:.2f}")
 
 
