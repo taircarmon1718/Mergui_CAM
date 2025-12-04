@@ -36,30 +36,33 @@ from B016712MP.AutoFocus import AutoFocus
 # =====================================================================
 def user_input_loop(user_data):
     """
-    This runs in the background. It waits for you to type.
+    This runs in the background. It waits for you to type an ID.
     """
-    print(">>> THREAD: Input listener started.")
-    print(">>> THREAD: Type 'hi' to change the flag, or 'quit' to exit.")
+    print("\n>>> THREAD: Input listener started.")
+    print(">>> THREAD: Type a number (ID) to track, or -1 to see all.\n")
 
     while True:
         try:
-            # This line BLOCKS. It waits for you.
-            # Because it is in a thread, it does NOT stop the video.
-            cmd = input("Command > ").strip().lower()
+            # This line waits for you to type in the terminal
+            user_input = input()  # Waits for Enter
 
-            if cmd == 'hi':
-                print(f"\n[User typed 'hi'] -> Changing status!")
-                user_data.user_message = "Hello from Terminal!"
+            # Convert string to integer
+            new_id = int(user_input)
 
-            elif cmd == 'quit':
-                print("Exiting...")
-                os._exit(0)  # Force kill everything
+            # Update the shared object
+            user_data.target_id = new_id
 
+            if new_id == -1:
+                print(f" [SYSTEM] Tracking Mode: ALL TARGETS")
             else:
-                print(f"Unknown command: {cmd}")
+                print(f" [SYSTEM] Tracking Mode: LOCKED ON ID {new_id}")
 
+        except ValueError:
+            print(" [ERROR] Please enter a valid number.")
         except EOFError:
             break
+
+
 # =====================================================================
 # USER APP CLASS
 # =====================================================================
@@ -69,7 +72,9 @@ class UserApp(app_callback_class):
       - PTZ focuser
       - frame counter
       - autofocus object and flags
+      - target_id
     """
+
     def __init__(self):
         super().__init__()
 
@@ -95,46 +100,24 @@ class UserApp(app_callback_class):
         except Exception as e:
             print(f"[ERROR] PTZ Init failed: {e}")
 
-        # Frame counter for timing-based logic (e.g., 3-second timer)
+        # --- ID SELECTION VARIABLE ---
+        self.target_id = -1  # -1 means show everything
+
+        # Frame counter for timing-based logic
         self.frame_counter = 0
-        self.has_moved_once = False  # ensure we only do the 3s move once
+        self.has_moved_once = False
 
-        # Old autofocus flags (kept so nothing external breaks)
-        self.af_running = True
-        self.af_pos = 0
-        self.af_step = 20
-        self.af_max = 600
-        self.af_best_val = 0.0
-        self.af_best_pos = 0
-        self.af_skip_counter = 0
-        self.af_finished = False
-        self.af_enabled = True
-        self.af_direction = +15
-        self.af_current_pos = 200
-        self.af_last_score = -1
-        self.af_done = False
-
-        # Autofocus is active at startup
+        # Autofocus logic
         self.is_focusing = True
-
-        # Initial focus guess
-        self.focuser.set(Focuser.OPT_FOCUS, self.af_current_pos)
+        self.focuser.set(Focuser.OPT_FOCUS, 200)  # Initial Guess
 
         print("[INIT] Starting Initial AutoFocus...")
 
-        # AutoFocus object.
-        # We pass camera=None because frames come from Hailo / GStreamer,
-        # and are given directly to stepFocus_hailo().
         self.autofocus = AutoFocus(self.focuser, camera=None)
         self.autofocus.debug = True
-
-        # Only run this autofocus session once
-        self.af_done_once = False
-
-        # Initialize incremental autofocus (coarse/fine state machine)
         self.autofocus.startFocus_hailo()
 
-        print("[INIT] Ready. Camera will move RIGHT in ~2 seconds.")
+        print("[INIT] Ready.")
         print("=" * 40 + "\n")
 
 
@@ -144,18 +127,15 @@ class UserApp(app_callback_class):
 def app_callback(pad, info, user_data: UserApp):
     """
     This function is called for each buffer that passes through the pipeline.
-    It must be **fast** and must NOT block, otherwise the whole GStreamer
-    pipeline will stall.
     """
     buffer = info.get_buffer()
     if buffer is None:
         return Gst.PadProbeReturn.OK
 
-    # Read ROI metadata (currently not used, but kept for future logic)
+    # Read ROI metadata (Detections + IDs)
     roi = hailo.get_roi_from_buffer(buffer)
 
-
-    # Increase frame counter (used for the 3-second timer)
+    # Increase frame counter
     user_data.frame_counter += 1
 
     # Extract the current video frame as a NumPy array
@@ -168,52 +148,46 @@ def app_callback(pad, info, user_data: UserApp):
     # INCREMENTAL AUTOFOCUS (non-blocking)
     # -----------------------------------------------------------
     if user_data.is_focusing:
-        # Run one autofocus step on this frame
         finished, best_pos = user_data.autofocus.stepFocus_hailo(frame)
 
         if finished:
-            # Autofocus has found a best position
             print(f"!!! [AF-H] FINISHED! Best Focus Position: {best_pos} !!!")
             user_data.is_focusing = False
-
-            # Apply best focus immediately
             user_data.focuser.set(Focuser.OPT_FOCUS, best_pos)
-            print(f"focus on {best_pos}")
 
-            #
-            '''def _restore_focus():
-                print("check")
-                user_data.focuser.set(Focuser.OPT_FOCUS, 270)
-                return False  # run only once'''
-            '''
-            # -----------------------------------------------------------
-            # 3-SECOND TIMER: move camera once after ~90 frames
-            # -----------------------------------------------------------
-            # ~30 FPS → 90 frames ≈ 3 seconds
-            if user_data.frame_counter == 90 and not user_data.has_moved_once:
-                print("\n>>> [TIMER] 3 Seconds passed! Moving Camera to Right...")
-                user_data.focuser.set(Focuser.OPT_MOTOR_X, 0)
-                user_data.has_moved_once = True
-                print("done")
-                '''
-            # Schedule the restore callback 10 seconds from now
-          #  GLib.timeout_add_seconds(10, _restore_focus)
+    # -----------------------------------------------------------
+    # DETECTION & ID LOGIC
+    # -----------------------------------------------------------
     detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
+
     for det in detections:
         label = det.get_label()
         confidence = det.get_confidence()
 
+        if label == "person" and confidence > 0.5:
+            # --- GET ID ---
+            track_id = -1
+            # Extract Unique ID from the detection object
+            for obj in det.get_objects_typed(hailo.HAILO_UNIQUE_ID):
+                track_id = obj.get_id()
 
-        if label == "person" and confidence > 0.9:
+            # --- FILTER BY ID ---
+            # If we are looking for a specific ID (not -1)
+            if user_data.target_id != -1:
+                if track_id != user_data.target_id:
+                    continue  # Skip this person if it's not the one we want
+
+            # If we reached here, it's either the target ID or we are showing everyone
+
             bbox = det.get_bbox()
             center_x = bbox.xmin() + (bbox.width() / 2)
             center_y = bbox.ymin() + (bbox.height() / 2)
 
+            prefix = ">>> DETECTED"
+            if user_data.target_id != -1:
+                prefix = f"*** TARGET LOCKED [{track_id}] ***"
 
-            print(f">>> DETECTED: {label.upper()} | Conf: {confidence:.2f} | Pos: X={center_x:.2f}, Y={center_y:.2f}")
-
-
-
+            print(f"{prefix}: Person | ID: {track_id} | Pos: X={center_x:.2f}, Y={center_y:.2f}")
 
     # Always return OK so GStreamer continues
     return Gst.PadProbeReturn.OK
@@ -238,8 +212,11 @@ if __name__ == "__main__":
     print("[MAIN] Starting Pipeline...")
 
     user_data = UserApp()
+
+    # Start the input thread (Pass user_data so it can update target_id)
     input_t = threading.Thread(target=user_input_loop, args=(user_data,), daemon=True)
     input_t.start()
+
     app = GStreamerDetectionApp(app_callback, user_data)
 
     try:
