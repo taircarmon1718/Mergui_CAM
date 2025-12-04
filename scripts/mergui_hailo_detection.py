@@ -36,24 +36,19 @@ from B016712MP.AutoFocus import AutoFocus
 # =====================================================================
 def user_input_loop(user_data):
     """
-    This runs in the background. It waits for you to type an ID.
+    Waits for user to type an ID in the terminal.
     """
     print("\n>>> THREAD: Input listener started.")
     print(">>> THREAD: Type a number (ID) to track, or -1 to see all.\n")
 
     while True:
         try:
-            # This line waits for you to type in the terminal
             user_input = input()  # Waits for Enter
-
-            # Convert string to integer
             new_id = int(user_input)
-
-            # Update the shared object
             user_data.target_id = new_id
 
             if new_id == -1:
-                print(f" [SYSTEM] Tracking Mode: ALL TARGETS")
+                print(f" [SYSTEM] Tracking Mode: IDLE (Show All)")
             else:
                 print(f" [SYSTEM] Tracking Mode: LOCKED ON ID {new_id}")
 
@@ -67,14 +62,6 @@ def user_input_loop(user_data):
 # USER APP CLASS
 # =====================================================================
 class UserApp(app_callback_class):
-    """
-    Holds all user-side state:
-      - PTZ focuser
-      - frame counter
-      - autofocus object and flags
-      - target_id
-    """
-
     def __init__(self):
         super().__init__()
 
@@ -82,37 +69,40 @@ class UserApp(app_callback_class):
         print("[INIT] Initializing PTZ Camera...")
 
         try:
-            # Create focuser driver
             self.focuser = Focuser(1)
-
-            # Set PTZ mode and open IR-cut filter
             self.focuser.set(Focuser.OPT_MODE, 1)
             time.sleep(0.2)
             self.focuser.set(Focuser.OPT_IRCUT, 0)
             time.sleep(0.5)
 
-            # Start at a known pan/tilt "home" position
-            print("[INIT] Setting Home Position (Pan: 0, Tilt: 25)...")
-            self.focuser.set(Focuser.OPT_MOTOR_X, 0)
-            self.focuser.set(Focuser.OPT_MOTOR_Y, 25)
+            # Start Center
+            self.center_pan = 0
+            self.center_tilt = 25
+
+            print("[INIT] Setting Home Position...")
+            self.focuser.set(Focuser.OPT_MOTOR_X, self.center_pan)
+            self.focuser.set(Focuser.OPT_MOTOR_Y, self.center_tilt)
             time.sleep(1.0)
 
         except Exception as e:
             print(f"[ERROR] PTZ Init failed: {e}")
 
-        # --- ID SELECTION VARIABLE ---
-        self.target_id = -1  # -1 means show everything
-
-        # Frame counter for timing-based logic
+        # State Variables
+        self.target_id = -1
         self.frame_counter = 0
-        self.has_moved_once = False
+
+        # Current Motor Positions (Software State)
+        self.current_pan = self.center_pan
+        self.current_tilt = self.center_tilt
+
+        # --- FIX: Define track_gain here ---
+        self.track_gain = 30
 
         # Autofocus logic
         self.is_focusing = True
-        self.focuser.set(Focuser.OPT_FOCUS, 200)  # Initial Guess
+        self.focuser.set(Focuser.OPT_FOCUS, 200)
 
         print("[INIT] Starting Initial AutoFocus...")
-
         self.autofocus = AutoFocus(self.focuser, camera=None)
         self.autofocus.debug = True
         self.autofocus.startFocus_hailo()
@@ -122,42 +112,30 @@ class UserApp(app_callback_class):
 
 
 # =====================================================================
-# CALLBACK FUNCTION (Runs ~30 times per second)
+# CALLBACK FUNCTION
 # =====================================================================
 def app_callback(pad, info, user_data: UserApp):
-    """
-    This function is called for each buffer that passes through the pipeline.
-    """
     buffer = info.get_buffer()
     if buffer is None:
         return Gst.PadProbeReturn.OK
 
-    # Read ROI metadata (Detections + IDs)
     roi = hailo.get_roi_from_buffer(buffer)
-
-    # Increase frame counter
     user_data.frame_counter += 1
 
-    # Extract the current video frame as a NumPy array
     fmt, w, h = get_caps_from_pad(pad)
     frame = get_numpy_from_buffer(buffer, fmt, w, h)
     if frame is None:
         return Gst.PadProbeReturn.OK
 
-    # -----------------------------------------------------------
-    # INCREMENTAL AUTOFOCUS (non-blocking)
-    # -----------------------------------------------------------
+    # --- AUTOFOCUS STEP ---
     if user_data.is_focusing:
         finished, best_pos = user_data.autofocus.stepFocus_hailo(frame)
-
         if finished:
-            print(f"!!! [AF-H] FINISHED! Best Focus Position: {best_pos} !!!")
+            print(f"!!! [AF] FINISHED! Best Focus: {best_pos} !!!")
             user_data.is_focusing = False
             user_data.focuser.set(Focuser.OPT_FOCUS, best_pos)
 
-    # -----------------------------------------------------------
-    # DETECTION & ID LOGIC
-    # -----------------------------------------------------------
+    # --- DETECTION & TRACKING ---
     detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
 
     for det in detections:
@@ -187,17 +165,13 @@ def app_callback(pad, info, user_data: UserApp):
             if user_data.target_id != -1:
 
                 # 1. Calculate Error (Center is 0.5)
-                # If X > 0.5 (Right side), Error is Positive
                 error_x = center_x - 0.5
 
                 # 2. Deadzone (Don't move if error is small, e.g. < 5%)
                 if abs(error_x) > 0.05:
 
                     # 3. Calculate New Pan
-                    # Note: We subtract because usually:
-                    # - Object on Right (x > 0.5) -> We need to turn Right (Increase Pan?)
-                    # - Let's use negative feedback: `new = current - (err * gain)`
-                    # - If direction is wrong, change (-) to (+) here:
+                    # 'track_gain' is now properly defined in __init__
                     move_amount = error_x * user_data.track_gain
                     new_pan = int(user_data.current_pan - move_amount)
 
@@ -208,9 +182,9 @@ def app_callback(pad, info, user_data: UserApp):
                     if abs(new_pan - user_data.current_pan) > 2:
                         user_data.focuser.set(Focuser.OPT_MOTOR_X, new_pan)
                         user_data.current_pan = new_pan
-                        # print(f"   -> Moving Pan to {new_pan}")
 
     return Gst.PadProbeReturn.OK
+
 
 # =====================================================================
 # MAIN EXECUTION
@@ -221,7 +195,6 @@ if __name__ == "__main__":
     args, unknown = parser.parse_known_args()
     args.input = "rpi"
 
-    # Configure environment for Hailo pipeline
     script_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.abspath(os.path.join(script_dir, ".."))
     env_file = os.path.join(project_root, ".env")
@@ -232,7 +205,7 @@ if __name__ == "__main__":
 
     user_data = UserApp()
 
-    # Start the input thread (Pass user_data so it can update target_id)
+    # Input Thread
     input_t = threading.Thread(target=user_input_loop, args=(user_data,), daemon=True)
     input_t.start()
 
