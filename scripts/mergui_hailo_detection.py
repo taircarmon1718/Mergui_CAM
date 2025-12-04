@@ -190,11 +190,8 @@ def app_callback(pad, info, user_data: UserApp):
             if user_data.target_id != -1:
 
                 # --- ADDED: CHECK COOLDOWN ---
-                # אם זזנו לאחרונה, לא לעשות כלום ולחכות
-                if user_data.track_wait_counter > 0:
-                    continue
 
-                    # 1. Calculate Error (Center is 0.5)
+                # 1. Calculate Error (Center is 0.5)
                 # If X > 0.5 (Right side), Error is Positive
                 error_x = center_x - 0.5
 
