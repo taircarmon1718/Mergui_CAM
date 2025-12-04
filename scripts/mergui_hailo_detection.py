@@ -120,7 +120,7 @@ class UserApp(app_callback_class):
         # NEW: Non-blocking cooldown for PTZ moves
         # ======================================================
         self.last_move_time = 0.0      # time of last PTZ move
-        self.move_cooldown = 0.5       # seconds between moves (tune this)
+        self.move_cooldown = 0.2       # seconds between moves (tune this)
         print("[INIT] Ready.")
         print("=" * 40 + "\n")
 
