@@ -236,7 +236,7 @@ def app_callback(pad, info, user_data: UserApp):
                     new_pan = max(0, min(180, new_pan))
 
                     # 5. Move Motor (Only if changed significantly)
-                    if abs(new_pan - user_data.current_pan) > 2:
+                    if abs(new_pan - user_data.current_pan) > 1:
                         # --------------------------------------------------------
                         # Non-blocking cooldown using time.monotonic()
                         # --------------------------------------------------------
